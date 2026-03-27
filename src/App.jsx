@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef } from "react";
+import { auth as authAPI, samples as samplesAPI, biobanks as biobanksAPI, requests as requestsAPI, favorites as favoritesAPI, messages as messagesAPI, threads as threadsAPI, supabase } from "./lib/supabase";
 
 // ── Mock Data ──────────────────────────────────────────────
 const BIOBANKS_DATA = [
@@ -124,11 +125,78 @@ export default function BioVault() {
   const [requests, setRequests] = useState(REQUESTS_DATA);
   const [favorites, setFavorites] = useState([]);
   const [viewBiobank, setViewBiobank] = useState(null);
+  const [dbReady, setDbReady] = useState(false);
+
+  // Listen for auth state changes
+  useEffect(() => {
+    const { data: { subscription } } = supabase.auth.onAuthStateChange(async (event, session) => {
+      if (session?.user) {
+        try {
+          const profile = await authAPI.getProfile();
+          if (profile) setUser(profile);
+        } catch (e) { console.log("Profile fetch error:", e); }
+      } else {
+        setUser(null);
+      }
+    });
+    return () => subscription.unsubscribe();
+  }, []);
+
+  // Load samples from Supabase
+  useEffect(() => {
+    samplesAPI.list().then(data => {
+      if (data && data.length > 0) {
+        // Map Supabase data to our format
+        const mapped = data.map(s => ({
+          id: s.id,
+          biobankId: s.biobank_id,
+          type: s.type,
+          subtype: s.subtype,
+          disease: s.disease,
+          organ: s.organ,
+          preservation: s.preservation,
+          quantity: s.quantity,
+          unit: s.unit,
+          price: Number(s.price),
+          consent: s.consent,
+          matchedData: s.matched_data || [],
+          availability: s.availability,
+          // Attach biobank info if joined
+          _biobank: s.biobanks || null,
+        }));
+        setSamples(mapped);
+        setDbReady(true);
+      }
+    }).catch(() => {
+      console.log("Using mock data (Supabase not connected yet)");
+    });
+  }, []);
+
+  // Load favorites when user logs in
+  useEffect(() => {
+    if (user && dbReady) {
+      favoritesAPI.list().then(data => {
+        if (data) setFavorites(data.map(f => f.sample_id));
+      }).catch(() => {});
+    }
+  }, [user, dbReady]);
 
   const nav = (v) => { setFadeIn(false); setTimeout(() => { setView(v); setFadeIn(true); window.scrollTo(0, 0); }, 200); };
+
   const login = (u) => { setUser(u); nav(u.role === "researcher" ? "researcher" : "biobank"); };
-  const logout = () => { setUser(null); nav("landing"); };
-  const toggleFav = (id) => setFavorites(f => f.includes(id) ? f.filter(x => x !== id) : [...f, id]);
+
+  const logout = async () => {
+    try { await authAPI.signOut(); } catch (e) {}
+    setUser(null);
+    nav("landing");
+  };
+
+  const toggleFav = async (id) => {
+    setFavorites(f => f.includes(id) ? f.filter(x => x !== id) : [...f, id]);
+    // Sync to DB in background
+    if (user) { try { await favoritesAPI.toggle(id); } catch (e) {} }
+  };
+
   const openBB = (bb) => { setViewBiobank(bb); nav("biobankProfile"); };
 
   return (
@@ -227,26 +295,41 @@ function AuthScreen({ onLogin, onNav }) {
   const [loading, setLoading] = useState(false);
   const set = (k, v) => setForm({ ...form, [k]: v });
 
-  const submit = () => {
+  const submit = async () => {
     setError("");
     if (!form.email || !form.password) return setError("Email and password are required.");
     if (mode === "signup" && !form.name) return setError("Name is required.");
     if (mode === "signup" && role === "researcher" && !form.institution) return setError("Institution is required.");
     if (mode === "signup" && role === "biobank" && !form.biobankName) return setError("Biobank name is required.");
     setLoading(true);
-    setTimeout(() => {
+    try {
+      if (mode === "signup") {
+        await authAPI.signUp({
+          email: form.email,
+          password: form.password,
+          name: form.name,
+          role,
+          institution: form.institution,
+          biobankName: form.biobankName,
+          location: form.location,
+        });
+        // Profile is auto-created by the DB trigger
+        const profile = await authAPI.getProfile();
+        onLogin(profile || { id: "new", name: form.name, email: form.email, role, institution: form.institution, joined: "March 2026" });
+      } else {
+        await authAPI.signIn({ email: form.email, password: form.password });
+        const profile = await authAPI.getProfile();
+        if (profile) {
+          onLogin(profile);
+        } else {
+          setError("Could not load profile. Try again.");
+        }
+      }
+    } catch (e) {
+      setError(e.message || "Authentication failed. Please try again.");
+    } finally {
       setLoading(false);
-      onLogin({
-        id: "u_" + Date.now(),
-        name: mode === "login" ? (role === "researcher" ? "Dr. Sarah Chen" : "NordicBio Admin") : form.name,
-        email: form.email, role,
-        institution: role === "researcher" ? (form.institution || "MIT") : undefined,
-        biobankId: role === "biobank" ? "bb1" : undefined,
-        biobankName: role === "biobank" ? (form.biobankName || "NordicBio Repository") : undefined,
-        location: form.location || "Stockholm, Sweden",
-        joined: "March 2026",
-      });
-    }, 800);
+    }
   };
 
   return (
@@ -332,7 +415,22 @@ function ResearcherView({ onNav, user, logout, samples, messages, setMessages, t
   });
   const getBB = (id) => BIOBANKS_DATA.find(b => b.id === id);
   const addCart = (s) => { if (!cart.find(c => c.id === s.id)) setCart([...cart, s]); };
-  const sendReq = () => { setRequestSent(true); setTimeout(() => { setRequestSent(false); setShowRequest(false); setCart([]); }, 2000); };
+  const [reqMsg, setReqMsg] = useState("");
+  const sendReq = async () => {
+    // Try saving each cart item to Supabase
+    for (const s of cart) {
+      try {
+        await requestsAPI.create({
+          sampleId: s.id,
+          biobankId: s.biobankId || s.biobank_id,
+          quantity: 1,
+          message: reqMsg,
+        });
+      } catch (e) { console.log("Request save error:", e); }
+    }
+    setRequestSent(true);
+    setTimeout(() => { setRequestSent(false); setShowRequest(false); setCart([]); setReqMsg(""); }, 2000);
+  };
   const clearF = () => { setPriceRange([0, 300]); setPresFilter([]); setDataFilter([]); };
   const afc = (priceRange[0] > 0 || priceRange[1] < 300 ? 1 : 0) + (presFilter.length > 0 ? 1 : 0) + (dataFilter.length > 0 ? 1 : 0);
 
@@ -449,7 +547,7 @@ function ResearcherView({ onNav, user, logout, samples, messages, setMessages, t
                   <button onClick={() => setCart(cart.filter(c => c.id !== s.id))} style={{ ...btnG, color: T.danger, padding: 4 }}>{I.close}</button>
                 </div>
               ))}
-              <textarea placeholder="Message to biobank(s)..." style={{ ...inp, width: "100%", minHeight: 70, marginTop: 14, resize: "vertical" }} />
+              <textarea value={reqMsg} onChange={e => setReqMsg(e.target.value)} placeholder="Message to biobank(s)..." style={{ ...inp, width: "100%", minHeight: 70, marginTop: 14, resize: "vertical" }} />
               <button onClick={sendReq} style={{ ...btnP, width: "100%", marginTop: 14, padding: "13px 0", fontSize: 14 }}>{I.send}<span style={{ marginLeft: 8 }}>Send Request</span></button>
             </>
           )}
@@ -626,7 +724,10 @@ function BiobankDash({ onNav, user, logout, samples, setSamples, requests, setRe
   const [tab, setTab] = useState("overview");
   const myBB = BIOBANKS_DATA[0];
   const mySamples = samples.filter(s => s.biobankId === myBB.id);
-  const updateReq = (id, st) => setRequests(requests.map(r => r.id === id ? { ...r, status: st } : r));
+  const updateReq = async (id, st) => {
+    setRequests(requests.map(r => r.id === id ? { ...r, status: st } : r));
+    try { await requestsAPI.updateStatus(id, st); } catch (e) { console.log("Status update error:", e); }
+  };
 
   const tabs = [
     { id: "overview", l: "Overview", icon: I.chart },
@@ -739,9 +840,36 @@ function AddSampleForm({ bb, samples, setSamples, onDone }) {
     RNA: ["Total RNA", "mRNA", "miRNA", "lncRNA"],
   };
 
-  const submit = () => {
+  const submit = async () => {
     if (!form.subtype || !form.disease || !form.organ || !form.quantity || !form.price) return;
-    setSamples([...samples, { ...form, id: "s" + Date.now(), biobankId: bb.id, quantity: parseInt(form.quantity), price: parseInt(form.price) }]);
+    const newSample = {
+      biobank_id: bb.id,
+      type: form.type,
+      subtype: form.subtype,
+      disease: form.disease,
+      organ: form.organ,
+      preservation: form.preservation,
+      quantity: parseInt(form.quantity),
+      unit: form.unit,
+      price: parseInt(form.price),
+      consent: form.consent,
+      matched_data: form.matchedData,
+      availability: form.availability,
+    };
+    try {
+      const saved = await samplesAPI.create(newSample);
+      // Add to local state too
+      setSamples([...samples, {
+        id: saved?.id || "s" + Date.now(),
+        biobankId: bb.id,
+        ...form,
+        quantity: parseInt(form.quantity),
+        price: parseInt(form.price),
+      }]);
+    } catch (e) {
+      // Fallback to local-only
+      setSamples([...samples, { ...form, id: "s" + Date.now(), biobankId: bb.id, quantity: parseInt(form.quantity), price: parseInt(form.price) }]);
+    }
     setSuccess(true);
     setTimeout(() => { setSuccess(false); onDone(); }, 1500);
   };
@@ -897,7 +1025,7 @@ function ProfilePage({ onNav, user, logout }) {
                 </div>
                 <div style={{ marginBottom: 12 }}><label style={lb}>Bio</label><textarea value={form.bio} onChange={e => set("bio", e.target.value)} rows={3} style={{ ...inp, width: "100%", resize: "vertical" }} /></div>
                 <div style={{ display: "flex", gap: 8 }}>
-                  <button onClick={() => setEditing(false)} style={{ ...btnP, padding: "9px 20px", fontSize: 13 }}>Save</button>
+                  <button onClick={async () => { try { await authAPI.updateProfile({ name: form.name, email: form.email, institution: form.institution, location: form.location, bio: form.bio }); } catch(e) {} setEditing(false); }} style={{ ...btnP, padding: "9px 20px", fontSize: 13 }}>Save</button>
                   <button onClick={() => setEditing(false)} style={{ ...btnS, padding: "9px 20px", fontSize: 13 }}>Cancel</button>
                 </div>
               </div>
