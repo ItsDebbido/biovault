@@ -126,6 +126,12 @@ export default function BioVault() {
   const [favorites, setFavorites] = useState([]);
   const [viewBiobank, setViewBiobank] = useState(null);
   const [dbReady, setDbReady] = useState(false);
+  const [allBiobanks, setAllBiobanks] = useState(BIOBANKS_DATA);
+
+  // Helper to find biobank by ID — checks DB data first, then mock
+  const getBB = (id) => {
+    return allBiobanks.find(b => b.id === id) || BIOBANKS_DATA.find(b => b.id === id) || { id, name: "Biobank", location: "", verified: false, specialties: [], certifications: [], rating: 0, samples: 0, bio: "", reviews: 0, founded: "", responseTime: "< 48h" };
+  };
 
   // Listen for auth state changes
   useEffect(() => {
@@ -142,8 +148,25 @@ export default function BioVault() {
     return () => subscription.unsubscribe();
   }, []);
 
-  // Load samples from Supabase
+  // Load samples and biobanks from Supabase
   useEffect(() => {
+    // Load biobanks
+    biobanksAPI.list().then(data => {
+      if (data && data.length > 0) {
+        const mapped = data.map(b => ({
+          id: b.id, name: b.name, location: b.location, bio: b.bio,
+          contact: b.contact_email, specialties: b.specialties || [],
+          certifications: b.certifications || [], founded: b.founded,
+          responseTime: b.response_time, verified: b.verified,
+          rating: b.biobank_ratings?.[0]?.avg_rating || 4.5,
+          reviews: b.biobank_ratings?.[0]?.review_count || 0,
+          samples: b.samples?.[0]?.count || 0,
+        }));
+        setAllBiobanks([...mapped, ...BIOBANKS_DATA]);
+      }
+    }).catch(() => {});
+
+    // Load samples
     samplesAPI.list().then(data => {
       if (data && data.length > 0) {
         // Map Supabase data to our format
@@ -217,8 +240,8 @@ export default function BioVault() {
       <div style={{ position: "relative", zIndex: 1, opacity: fadeIn ? 1 : 0, transition: "opacity 0.2s ease" }}>
         {view === "landing" && <Landing onNav={nav} user={user} logout={logout} />}
         {view === "auth" && <AuthScreen onLogin={login} onNav={nav} />}
-        {view === "researcher" && <ResearcherView onNav={nav} user={user} logout={logout} samples={samples} messages={messages} setMessages={setMessages} threads={threads} favorites={favorites} toggleFav={toggleFav} openBB={openBB} />}
-        {view === "biobank" && <BiobankDash onNav={nav} user={user} logout={logout} samples={samples} setSamples={setSamples} requests={requests} setRequests={setRequests} messages={messages} setMessages={setMessages} threads={threads} />}
+        {view === "researcher" && <ResearcherView onNav={nav} user={user} logout={logout} samples={samples} messages={messages} setMessages={setMessages} threads={threads} favorites={favorites} toggleFav={toggleFav} openBB={openBB} getBB={getBB} />}
+        {view === "biobank" && <BiobankDash onNav={nav} user={user} logout={logout} samples={samples} setSamples={setSamples} requests={requests} setRequests={setRequests} messages={messages} setMessages={setMessages} threads={threads} getBB={getBB} />}
         {view === "profile" && <ProfilePage onNav={nav} user={user} logout={logout} />}
         {view === "biobankProfile" && viewBiobank && <BBProfile onNav={nav} user={user} logout={logout} bb={viewBiobank} samples={samples} favorites={favorites} toggleFav={toggleFav} />}
       </div>
@@ -385,7 +408,7 @@ function AuthScreen({ onLogin, onNav }) {
 }
 
 // ── Researcher View ────────────────────────────────────────
-function ResearcherView({ onNav, user, logout, samples, messages, setMessages, threads, favorites, toggleFav, openBB }) {
+function ResearcherView({ onNav, user, logout, samples, messages, setMessages, threads, favorites, toggleFav, openBB, getBB }) {
   const [search, setSearch] = useState("");
   const [typeFilter, setTypeFilter] = useState("All");
   const [selectedSample, setSelectedSample] = useState(null);
@@ -412,7 +435,6 @@ function ResearcherView({ onNav, user, logout, samples, messages, setMessages, t
     const mD = dataFilter.length === 0 || dataFilter.some(d => s.matchedData.includes(d));
     return mS && mT && mP && mPr && mD;
   });
-  const getBB = (id) => BIOBANKS_DATA.find(b => b.id === id);
   const addCart = (s) => { if (!cart.find(c => c.id === s.id)) setCart([...cart, s]); };
   const [reqMsg, setReqMsg] = useState("");
   const sendReq = () => {
@@ -587,7 +609,7 @@ function ResearcherView({ onNav, user, logout, samples, messages, setMessages, t
           <h3 style={{ fontFamily: "'Space Grotesk',sans-serif", fontSize: 18, fontWeight: 600, marginBottom: 18 }}>My Requests</h3>
           {MY_REQUESTS.map((r, i) => {
             const s = SAMPLES_DATA.find(x => x.id === r.sampleId);
-            const bb = BIOBANKS_DATA.find(x => x.id === r.biobankId);
+            const bb = getBB(r.biobankId);
             const sc = statusColors[r.status];
             const steps = ["pending", "approved", "shipped", "delivered"];
             const si = steps.indexOf(r.status);
@@ -717,7 +739,7 @@ function MsgPanel({ messages, setMessages, threads, role, userName }) {
 }
 
 // ── Biobank Dashboard ──────────────────────────────────────
-function BiobankDash({ onNav, user, logout, samples, setSamples, requests, setRequests, messages, setMessages, threads }) {
+function BiobankDash({ onNav, user, logout, samples, setSamples, requests, setRequests, messages, setMessages, threads, getBB }) {
   const [tab, setTab] = useState("overview");
   const myBB = BIOBANKS_DATA[0];
   const mySamples = samples.filter(s => s.biobankId === myBB.id);
@@ -858,15 +880,6 @@ function AddSampleForm({ bb, samples, setSamples, onDone }) {
       <div style={{ width: 60, height: 60, borderRadius: "50%", background: T.accentDim, display: "flex", alignItems: "center", justifyContent: "center", margin: "0 auto 16px", color: T.accent }}>{I.checkCircle}</div>
       <h3 style={{ fontFamily: "'Space Grotesk',sans-serif", fontSize: 18, color: T.accent }}>Sample Listed!</h3>
       <p style={{ color: T.textMuted, marginTop: 8, fontSize: 13 }}>Now visible to researchers worldwide.</p>
-    </div>
-  );
-
-  const Chip = ({ items, selected, onSelect, multi }) => (
-    <div style={{ display: "flex", gap: 5, flexWrap: "wrap" }}>
-      {items.map(item => {
-        const active = multi ? selected.includes(item) : selected === item;
-        return <button key={item} onClick={() => onSelect(item)} style={{ padding: "7px 13px", borderRadius: 8, border: `1px solid ${active ? T.accent : T.border}`, background: active ? T.accentDim : "transparent", color: active ? T.accent : T.textMuted, cursor: "pointer", fontSize: 12, fontFamily: "inherit", transition: "all 0.15s" }}>{item}</button>;
-      })}
     </div>
   );
 
