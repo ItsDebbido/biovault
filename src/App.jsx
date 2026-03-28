@@ -164,7 +164,7 @@ export default function BioVault() {
         }));
         setAllBiobanks([...mapped, ...BIOBANKS_DATA]);
       }
-    }).catch(() => {});
+    }).catch(e => console.error('SUPABASE ERROR:', e));
 
     // Load samples
     samplesAPI.list().then(data => {
@@ -200,7 +200,7 @@ export default function BioVault() {
     if (user && dbReady) {
       favoritesAPI.list().then(data => {
         if (data) setFavorites(data.map(f => f.sample_id));
-      }).catch(() => {});
+      }).catch(e => console.error('SUPABASE ERROR:', e));
     }
   }, [user, dbReady]);
 
@@ -209,14 +209,15 @@ export default function BioVault() {
   const login = (u) => { setUser(u); nav(u.role === "researcher" ? "researcher" : "biobank"); };
 
   const logout = () => {
-    authAPI.signOut().catch(() => {});
+    authAPI.signOut().catch(e => console.error('SUPABASE ERROR:', e));
     setUser(null);
     nav("landing");
   };
 
   const toggleFav = (id) => {
+    console.log("TOGGLE FAV:", id, "user:", user?.id || user?.email || "none");
     setFavorites(f => f.includes(id) ? f.filter(x => x !== id) : [...f, id]);
-    if (user) { favoritesAPI.toggle(id).catch(() => {}); }
+    if (user) { favoritesAPI.toggle(id).catch(e => console.error('SUPABASE ERROR:', e)); }
   };
 
   const openBB = (bb) => { setViewBiobank(bb); nav("biobankProfile"); };
@@ -438,8 +439,10 @@ function ResearcherView({ onNav, user, logout, samples, messages, setMessages, t
   const addCart = (s) => { if (!cart.find(c => c.id === s.id)) setCart([...cart, s]); };
   const [reqMsg, setReqMsg] = useState("");
   const sendReq = () => {
+    console.log("SEND REQUEST:", cart.length, "items, user:", user?.id || "none");
     // Save to DB in background
     cart.forEach(s => {
+      console.log("Saving request for sample:", s.id, "biobank:", s.biobankId || s.biobank_id);
       requestsAPI.create({
         sampleId: s.id,
         biobankId: s.biobankId || s.biobank_id,
@@ -1017,7 +1020,7 @@ function ProfilePage({ onNav, user, logout }) {
                 </div>
                 <div style={{ marginBottom: 12 }}><label style={lb}>Bio</label><textarea value={form.bio} onChange={e => set("bio", e.target.value)} rows={3} style={{ ...inp, width: "100%", resize: "vertical" }} /></div>
                 <div style={{ display: "flex", gap: 8 }}>
-                  <button onClick={() => { authAPI.updateProfile({ name: form.name, email: form.email, institution: form.institution, location: form.location, bio: form.bio }).catch(() => {}); setEditing(false); }} style={{ ...btnP, padding: "9px 20px", fontSize: 13 }}>Save</button>
+                  <button onClick={() => { authAPI.updateProfile({ name: form.name, email: form.email, institution: form.institution, location: form.location, bio: form.bio }).catch(e => console.error('SUPABASE ERROR:', e)); setEditing(false); }} style={{ ...btnP, padding: "9px 20px", fontSize: 13 }}>Save</button>
                   <button onClick={() => setEditing(false)} style={{ ...btnS, padding: "9px 20px", fontSize: 13 }}>Cancel</button>
                 </div>
               </div>
