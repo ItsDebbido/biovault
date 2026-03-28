@@ -225,17 +225,19 @@ export const requests = {
         message,
         status: 'pending'
       })
-      .select('*, samples(*), biobanks(*)')
-      .single();
+      .select()
+      .maybeSingle();
     if (error) throw error;
 
-    // Auto-create a thread for this request
-    await threads.create({
-      biobankId,
-      sampleId,
-      requestId: data.id,
-      firstMessage: message
-    });
+    // Auto-create a thread (non-blocking, don't fail if this errors)
+    try {
+      await threads.create({
+        biobankId,
+        sampleId,
+        requestId: data?.id,
+        firstMessage: message
+      });
+    } catch (e) { console.log("Thread creation skipped:", e); }
 
     return data;
   },
@@ -408,15 +410,14 @@ export const favorites = {
     const { data: { user } } = await supabase.auth.getUser();
 
     // Check if already favorited
-    const { data: existing } = await supabase
+    const { data: rows } = await supabase
       .from('favorites')
       .select('id')
       .eq('user_id', user.id)
-      .eq('sample_id', sampleId)
-      .single();
+      .eq('sample_id', sampleId);
 
-    if (existing) {
-      await supabase.from('favorites').delete().eq('id', existing.id);
+    if (rows && rows.length > 0) {
+      await supabase.from('favorites').delete().eq('id', rows[0].id);
       return false; // removed
     } else {
       await supabase.from('favorites').insert({ user_id: user.id, sample_id: sampleId });
