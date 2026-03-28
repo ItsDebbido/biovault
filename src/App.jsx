@@ -418,6 +418,31 @@ function ResearcherView({ onNav, user, logout, samples, messages, setMessages, t
   const [showFavorites, setShowFavorites] = useState(false);
   const [showTracker, setShowTracker] = useState(false);
   const [cart, setCart] = useState([]);
+  const [realThreads, setRealThreads] = useState([]);
+  const [myRealRequests, setMyRealRequests] = useState([]);
+
+  // Load real threads for researcher
+  useEffect(() => {
+    if (!user) return;
+    threadsAPI.listMine().then(data => {
+      if (data) setRealThreads(data.map(t => ({
+        id: t.id, biobankId: t.biobank_id, sampleId: t.sample_id,
+        lastMessage: t.last_message, lastDate: t.last_message_at?.slice(0, 10),
+        biobankName: t.biobanks?.name || "Biobank",
+        sampleInfo: t.samples ? `${t.samples.disease} — ${t.samples.subtype}` : "",
+      })));
+    }).catch(() => {});
+
+    // Load real requests for tracker
+    requestsAPI.listMine().then(data => {
+      if (data) setMyRealRequests(data.map(r => ({
+        id: r.id, sampleId: r.sample_id, biobankId: r.biobank_id,
+        quantity: r.quantity, status: r.status, date: r.created_at?.slice(0, 10),
+        disease: r.samples?.disease || "Sample", subtype: r.samples?.subtype || "",
+        biobankName: r.biobanks?.name || "Biobank",
+      })));
+    }).catch(() => {});
+  }, [user]);
   const [requestSent, setRequestSent] = useState(false);
   const [showFilters, setShowFilters] = useState(false);
   const [priceRange, setPriceRange] = useState([0, 300]);
@@ -576,7 +601,7 @@ function ResearcherView({ onNav, user, logout, samples, messages, setMessages, t
         </Modal>
       )}
 
-      {showMessages && <Modal onClose={() => setShowMessages(false)}><MsgPanel messages={messages} setMessages={setMessages} threads={threads} role="researcher" userName={user?.name || "Researcher"} /></Modal>}
+      {showMessages && <Modal onClose={() => setShowMessages(false)}><RealMsgPanel threads={realThreads} role="researcher" userName={user?.name || "Researcher"} userId={user?.id} /></Modal>}
 
       {showFavorites && (
         <Modal onClose={() => setShowFavorites(false)}>
@@ -610,9 +635,11 @@ function ResearcherView({ onNav, user, logout, samples, messages, setMessages, t
       {showTracker && (
         <Modal onClose={() => setShowTracker(false)}>
           <h3 style={{ fontFamily: "'Space Grotesk',sans-serif", fontSize: 18, fontWeight: 600, marginBottom: 18 }}>My Requests</h3>
-          {MY_REQUESTS.map((r, i) => {
-            const s = SAMPLES_DATA.find(x => x.id === r.sampleId);
-            const bb = getBB(r.biobankId);
+          {(myRealRequests.length > 0 ? myRealRequests : MY_REQUESTS).map((r, i) => {
+            const isReal = !!r.disease;
+            const disease = isReal ? r.disease : (SAMPLES_DATA.find(x => x.id === r.sampleId)?.disease || "Sample");
+            const subtype = isReal ? r.subtype : (SAMPLES_DATA.find(x => x.id === r.sampleId)?.subtype || "");
+            const bbName = isReal ? r.biobankName : (getBB(r.biobankId)?.name || "Biobank");
             const sc = statusColors[r.status];
             const steps = ["pending", "approved", "shipped", "delivered"];
             const si = steps.indexOf(r.status);
@@ -621,8 +648,8 @@ function ResearcherView({ onNav, user, logout, samples, messages, setMessages, t
               <div key={r.id} style={{ padding: 16, background: T.bg, borderRadius: 10, border: `1px solid ${T.border}`, marginBottom: 10, animation: `slideUp 0.3s ease ${i * 0.06}s both` }}>
                 <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 8 }}>
                   <div>
-                    <div style={{ fontSize: 14, fontWeight: 600 }}>{s ? s.disease + " — " + s.subtype : "Sample"}</div>
-                    <div style={{ fontSize: 12, color: T.textMuted }}>{bb ? bb.name : ""} · Qty: {r.quantity} · {r.date}</div>
+                    <div style={{ fontSize: 14, fontWeight: 600 }}>{disease} — {subtype}</div>
+                    <div style={{ fontSize: 12, color: T.textMuted }}>{bbName} · Qty: {r.quantity} · {r.date}</div>
                   </div>
                   <span style={{ ...tg, background: `${sc}22`, color: sc, fontWeight: 600 }}>{statusLabels[r.status]}</span>
                 </div>
@@ -744,9 +771,58 @@ function MsgPanel({ messages, setMessages, threads, role, userName }) {
 // ── Biobank Dashboard ──────────────────────────────────────
 function BiobankDash({ onNav, user, logout, samples, setSamples, requests, setRequests, messages, setMessages, threads, getBB }) {
   const [tab, setTab] = useState("overview");
-  const myBB = BIOBANKS_DATA[0];
+  const [myBB, setMyBB] = useState(BIOBANKS_DATA[0]);
+  const [realRequests, setRealRequests] = useState([]);
+  const [realThreads, setRealThreads] = useState([]);
+  const [realMessages, setRealMessages] = useState([]);
+  const [loadingReqs, setLoadingReqs] = useState(true);
+
+  // Load the user's biobank from DB
+  useEffect(() => {
+    biobanksAPI.getMine().then(bb => {
+      if (bb) setMyBB({ id: bb.id, name: bb.name, location: bb.location, bio: bb.bio, specialties: bb.specialties || [], certifications: bb.certifications || [], verified: bb.verified, rating: 4.8, samples: 0, founded: bb.founded, responseTime: bb.response_time, reviews: 0 });
+    }).catch(() => {});
+  }, []);
+
+  // Load real requests for this biobank
+  useEffect(() => {
+    if (!myBB?.id) return;
+    requestsAPI.listForBiobank(myBB.id).then(data => {
+      if (data) {
+        const mapped = data.map(r => ({
+          id: r.id, researcher: r.profiles?.name || "Researcher", institution: r.profiles?.institution || "",
+          sampleId: r.sample_id, quantity: r.quantity, status: r.status, date: r.created_at?.slice(0, 10),
+          message: r.message, _sample: r.samples,
+        }));
+        setRealRequests(mapped);
+      }
+      setLoadingReqs(false);
+    }).catch(() => setLoadingReqs(false));
+
+    // Subscribe to realtime request updates
+    const channel = requestsAPI.subscribeToUpdates((payload) => {
+      setRealRequests(prev => prev.map(r => r.id === payload.new.id ? { ...r, status: payload.new.status } : r));
+    });
+    return () => { if (channel) channel.unsubscribe(); };
+  }, [myBB?.id]);
+
+  // Load real threads
+  useEffect(() => {
+    threadsAPI.listMine().then(data => {
+      if (data) setRealThreads(data.map(t => ({
+        id: t.id, biobankId: t.biobank_id, sampleId: t.sample_id,
+        lastMessage: t.last_message, lastDate: t.last_message_at?.slice(0, 10),
+        researcherName: t.profiles?.name || "Researcher",
+        sampleInfo: t.samples ? `${t.samples.disease} — ${t.samples.subtype}` : "",
+      })));
+    }).catch(() => {});
+  }, []);
+
+  const allRequests = realRequests.length > 0 ? realRequests : requests;
   const mySamples = samples.filter(s => s.biobankId === myBB.id);
+
   const updateReq = (id, st) => {
+    setRealRequests(prev => prev.map(r => r.id === id ? { ...r, status: st } : r));
     setRequests(requests.map(r => r.id === id ? { ...r, status: st } : r));
     requestsAPI.updateStatus(id, st).catch(e => console.log("Status update:", e));
   };
@@ -755,8 +831,8 @@ function BiobankDash({ onNav, user, logout, samples, setSamples, requests, setRe
     { id: "overview", l: "Overview", icon: I.chart },
     { id: "inventory", l: "Inventory", icon: I.flask },
     { id: "add", l: "Add Sample", icon: I.plus },
-    { id: "requests", l: "Requests", icon: I.inbox, badge: requests.filter(r => r.status === "pending").length },
-    { id: "messages", l: "Messages", icon: I.msg, badge: 2 },
+    { id: "requests", l: "Requests", icon: I.inbox, badge: allRequests.filter(r => r.status === "pending").length },
+    { id: "messages", l: "Messages", icon: I.msg, badge: realThreads.length },
   ];
 
   return (
@@ -773,11 +849,11 @@ function BiobankDash({ onNav, user, logout, samples, setSamples, requests, setRe
           ))}
         </aside>
         <main style={{ flex: 1, padding: "24px 24px", overflowY: "auto" }}>
-          {tab === "overview" && <OverviewTab bb={myBB} samples={mySamples} requests={requests} />}
+          {tab === "overview" && <OverviewTab bb={myBB} samples={mySamples} requests={allRequests} />}
           {tab === "inventory" && <InventoryTab samples={mySamples} onAdd={() => setTab("add")} />}
           {tab === "add" && <AddSampleForm bb={myBB} samples={samples} setSamples={setSamples} onDone={() => setTab("inventory")} />}
-          {tab === "requests" && <RequestsTab requests={requests} onUpdate={updateReq} />}
-          {tab === "messages" && <MsgPanel messages={messages} setMessages={setMessages} threads={threads} role="biobank" userName={myBB.name} />}
+          {tab === "requests" && <RequestsTab requests={allRequests} onUpdate={updateReq} />}
+          {tab === "messages" && <RealMsgPanel threads={realThreads} role="biobank" userName={myBB.name} userId={user?.id} />}
         </main>
       </div>
     </div>
@@ -948,20 +1024,21 @@ function RequestsTab({ requests, onUpdate }) {
   return (
     <div>
       <h2 style={{ fontFamily: "'Space Grotesk',sans-serif", fontSize: 18, fontWeight: 600, marginBottom: 18 }}>Sample Requests</h2>
+      {requests.length === 0 ? <p style={{ color: T.textMuted, textAlign: "center", padding: 36 }}>No requests yet.</p> : (
       <div style={{ display: "grid", gap: 10 }}>
         {requests.map((r, i) => {
-          const s = SAMPLES_DATA.find(x => x.id === r.sampleId);
+          const s = r._sample || SAMPLES_DATA.find(x => x.id === r.sampleId);
           return (
             <div key={r.id} style={{ ...crd, animation: `slideUp 0.4s ease ${i * 0.06}s both` }}>
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "start", marginBottom: 10 }}>
                 <div>
-                  <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontSize: 14, fontWeight: 600, marginBottom: 3 }}>{r.researcher}</div>
-                  <div style={{ fontSize: 12, color: T.textMuted }}>{r.institution} · {r.date}</div>
+                  <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontSize: 14, fontWeight: 600, marginBottom: 3 }}>{r.researcher || "Researcher"}</div>
+                  <div style={{ fontSize: 12, color: T.textMuted }}>{r.institution || ""} · {r.date}</div>
                 </div>
-                <span style={{ ...tg, background: `${sc[r.status]}22`, color: sc[r.status], textTransform: "capitalize" }}>{r.status}</span>
+                <span style={{ ...tg, background: `${(sc[r.status] || T.textMuted)}22`, color: sc[r.status] || T.textMuted, textTransform: "capitalize" }}>{r.status}</span>
               </div>
               <div style={{ padding: 10, background: T.bg, borderRadius: 8, marginBottom: 10, border: `1px solid ${T.border}`, fontSize: 13 }}>
-                <strong>{s?.disease}</strong> — {s?.subtype} · Qty: {r.quantity}
+                <strong>{s?.disease || "Sample"}</strong> — {s?.subtype || ""} · Qty: {r.quantity}
               </div>
               <p style={{ fontSize: 13, color: T.textMuted, marginBottom: 12, lineHeight: 1.5 }}>{r.message}</p>
               {r.status === "pending" && (
@@ -1152,6 +1229,88 @@ function BBProfile({ onNav, user, logout, bb, samples, favorites, toggleFav }) {
           <button onClick={() => onNav("researcher")} style={{ ...btnP, padding: "12px 28px" }}>Browse & Request Samples</button>
         </div>
       </div>
+    </div>
+  );
+}
+
+// ── Real-time Messaging Panel ──────────────────────
+function RealMsgPanel({ threads, role, userName, userId }) {
+  const [activeThread, setActiveThread] = useState(null);
+  const [threadMsgs, setThreadMsgs] = useState([]);
+  const [newMsg, setNewMsg] = useState("");
+  const [loading, setLoading] = useState(false);
+  const endRef = useRef(null);
+
+  // Load messages when a thread is selected
+  useEffect(() => {
+    if (!activeThread) return;
+    setLoading(true);
+    messagesAPI.listByThread(activeThread).then(data => {
+      if (data) setThreadMsgs(data.map(m => ({
+        id: m.id, from: m.sender_id === userId ? role : (role === "researcher" ? "biobank" : "researcher"),
+        fromName: m.sender_name, text: m.text, time: m.created_at ? new Date(m.created_at).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" }) : "Now",
+      })));
+      setLoading(false);
+    }).catch(() => setLoading(false));
+
+    // Subscribe to new messages in real-time
+    const channel = messagesAPI.subscribeToThread(activeThread, (payload) => {
+      const m = payload.new;
+      setThreadMsgs(prev => [...prev, {
+        id: m.id, from: m.sender_id === userId ? role : (role === "researcher" ? "biobank" : "researcher"),
+        fromName: m.sender_name, text: m.text, time: "Just now",
+      }]);
+    });
+    return () => { if (channel) channel.unsubscribe(); };
+  }, [activeThread, userId, role]);
+
+  useEffect(() => { endRef.current?.scrollIntoView({ behavior: "smooth" }); }, [threadMsgs.length]);
+
+  const send = () => {
+    if (!newMsg.trim() || !activeThread) return;
+    // Add locally immediately
+    setThreadMsgs(prev => [...prev, { id: "m" + Date.now(), from: role, fromName: userName, text: newMsg.trim(), time: "Just now" }]);
+    // Save to DB
+    messagesAPI.send({ threadId: activeThread, text: newMsg.trim(), senderName: userName }).catch(e => console.log("Msg send:", e));
+    setNewMsg("");
+  };
+
+  return (
+    <div>
+      <h3 style={{ fontFamily: "'Space Grotesk',sans-serif", fontSize: 18, fontWeight: 600, marginBottom: 14 }}>Messages</h3>
+      {!activeThread ? (
+        threads.length === 0 ? <p style={{ color: T.textMuted, textAlign: "center", padding: 36 }}>No conversations yet. Send a request to start one.</p> : (
+          threads.map(t => (
+            <div key={t.id} onClick={() => setActiveThread(t.id)} style={{ padding: 14, borderRadius: 10, border: `1px solid ${T.border}`, marginBottom: 8, cursor: "pointer", background: T.bg }}>
+              <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 5 }}>
+                <span style={{ fontSize: 13, fontWeight: 600 }}>{role === "researcher" ? (t.biobankName || "Biobank") : (t.researcherName || "Researcher")}</span>
+                <span style={{ fontSize: 11, color: T.textMuted }}>{t.lastDate}</span>
+              </div>
+              <div style={{ fontSize: 12, color: T.accent, marginBottom: 3 }}>{t.sampleInfo}</div>
+              <div style={{ fontSize: 12, color: T.textMuted, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{t.lastMessage}</div>
+            </div>
+          ))
+        )
+      ) : (
+        <div>
+          <button onClick={() => setActiveThread(null)} style={{ ...btnG, marginBottom: 10, padding: "6px 0" }}>{I.back} Back</button>
+          <div style={{ maxHeight: 300, overflowY: "auto", marginBottom: 14, padding: 2 }}>
+            {loading ? <p style={{ color: T.textMuted, textAlign: "center", padding: 20 }}>Loading...</p> : (
+              threadMsgs.map(m => (
+                <div key={m.id} style={{ marginBottom: 10, display: "flex", flexDirection: "column", alignItems: m.from === role ? "flex-end" : "flex-start" }}>
+                  <div style={{ fontSize: 11, color: T.textMuted, marginBottom: 3 }}>{m.fromName} · {m.time}</div>
+                  <div style={{ padding: "9px 13px", borderRadius: 12, maxWidth: "85%", fontSize: 13, lineHeight: 1.6, background: m.from === role ? T.accentDim : T.surfaceLight, color: m.from === role ? T.accent : T.text, border: `1px solid ${m.from === role ? "rgba(0,229,160,0.2)" : T.border}` }}>{m.text}</div>
+                </div>
+              ))
+            )}
+            <div ref={endRef} />
+          </div>
+          <div style={{ display: "flex", gap: 8 }}>
+            <input value={newMsg} onChange={e => setNewMsg(e.target.value)} onKeyDown={e => e.key === "Enter" && send()} placeholder="Type a message..." style={{ ...inp, flex: 1 }} />
+            <button onClick={send} style={{ ...btnP, padding: "10px 14px" }}>{I.send}</button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
