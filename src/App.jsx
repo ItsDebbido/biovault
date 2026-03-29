@@ -91,8 +91,9 @@ export default function BioVault() {
     const { data: { subscription } } = supabase.auth.onAuthStateChange(async (event, session) => {
       if (session?.user) {
         try {
-          const profile = await authAPI.getProfile();
+          const profile = await authAPI.getProfile(session.user.id);
           if (profile) setUser(profile);
+          else setUser({ id: session.user.id, email: session.user.email, name: session.user.email, role: session.user.user_metadata?.role || "researcher" });
         } catch (e) { console.log("Profile fetch error:", e); }
       } else {
         setUser(null);
@@ -150,12 +151,12 @@ export default function BioVault() {
 
   // Load favorites when user logs in
   useEffect(() => {
-    if (user && dbReady) {
-      favoritesAPI.list().then(data => {
+    if (user?.id && dbReady) {
+      favoritesAPI.list(user.id).then(data => {
         if (data) setFavorites(data.map(f => f.sample_id));
       }).catch(e => console.error('SUPABASE ERROR:', e));
     }
-  }, [user, dbReady]);
+  }, [user?.id, dbReady]);
 
   const nav = (v) => { setFadeIn(false); setTimeout(() => { setView(v); setFadeIn(true); window.scrollTo(0, 0); }, 200); };
 
@@ -168,9 +169,12 @@ export default function BioVault() {
   };
 
   const toggleFav = (id) => {
-    console.log("TOGGLE FAV:", id, "user:", user?.id);
-    setFavorites(f => f.includes(id) ? f.filter(x => x !== id) : [...f, id]);
-    if (user?.id) { favoritesAPI.toggle(id, user.id).catch(e => console.error('SUPABASE ERROR:', e)); }
+    const isFav = favorites.includes(id);
+    setFavorites(f => isFav ? f.filter(x => x !== id) : [...f, id]);
+    if (user?.id) {
+      if (isFav) { favoritesAPI.remove(user.id, id).catch(e => console.error('FAV ERROR:', e)); }
+      else { favoritesAPI.add(user.id, id).catch(e => console.error('FAV ERROR:', e)); }
+    }
   };
 
   const openBB = (bb) => { setViewBiobank(bb); nav("biobankProfile"); };
@@ -289,16 +293,19 @@ function AuthScreen({ onLogin, onNav }) {
           biobankName: form.biobankName,
           location: form.location,
         });
-        // Profile is auto-created by the DB trigger
-        const profile = await authAPI.getProfile();
-        onLogin(profile || { id: "new", name: form.name, email: form.email, role, institution: form.institution, joined: "March 2026" });
+        // Get user ID from session
+        const { data: { session } } = await supabase.auth.getSession();
+        const uid = session?.user?.id;
+        const profile = uid ? await authAPI.getProfile(uid) : null;
+        onLogin(profile || { id: uid || "new", name: form.name, email: form.email, role, institution: form.institution, joined: "March 2026" });
       } else {
-        await authAPI.signIn({ email: form.email, password: form.password });
-        const profile = await authAPI.getProfile();
+        const { user: signedIn } = await authAPI.signIn({ email: form.email, password: form.password });
+        const uid = signedIn?.id;
+        const profile = uid ? await authAPI.getProfile(uid) : null;
         if (profile) {
           onLogin(profile);
         } else {
-          setError("Could not load profile. Try again.");
+          onLogin({ id: uid, email: form.email, name: form.email, role });
         }
       }
     } catch (e) {
@@ -376,8 +383,8 @@ function ResearcherView({ onNav, user, logout, samples, messages, setMessages, t
 
   // Load real threads for researcher
   useEffect(() => {
-    if (!user) return;
-    threadsAPI.listMine().then(data => {
+    if (!user?.id) return;
+    threadsAPI.listForResearcher(user.id).then(data => {
       if (data) setRealThreads(data.map(t => ({
         id: t.id, biobankId: t.biobank_id, sampleId: t.sample_id,
         lastMessage: t.last_message, lastDate: t.last_message_at?.slice(0, 10),
@@ -387,7 +394,7 @@ function ResearcherView({ onNav, user, logout, samples, messages, setMessages, t
     }).catch(() => {});
 
     // Load real requests for tracker
-    requestsAPI.listMine().then(data => {
+    requestsAPI.listMine(user.id).then(data => {
       if (data) setMyRealRequests(data.map(r => ({
         id: r.id, sampleId: r.sample_id, biobankId: r.biobank_id,
         quantity: r.quantity, status: r.status, date: r.created_at?.slice(0, 10),
@@ -417,17 +424,15 @@ function ResearcherView({ onNav, user, logout, samples, messages, setMessages, t
   const addCart = (s) => { if (!cart.find(c => c.id === s.id)) setCart([...cart, s]); };
   const [reqMsg, setReqMsg] = useState("");
   const sendReq = () => {
-    console.log("SEND REQUEST:", cart.length, "items, user:", user?.id || "none");
-    // Save to DB in background
     cart.forEach(s => {
-      console.log("Saving request for sample:", s.id, "biobank:", s.biobankId || s.biobank_id);
-      requestsAPI.create({
+      requestsAPI.create(user?.id, {
         sampleId: s.id,
         biobankId: s.biobankId || s.biobank_id,
         quantity: 1,
         message: reqMsg,
-        userId: user?.id,
-      }).catch(e => console.log("Request save:", e));
+      }).then(() => {
+        threadsAPI.create(user?.id, { biobankId: s.biobankId || s.biobank_id, sampleId: s.id, message: reqMsg }).catch(() => {});
+      }).catch(e => console.error("Request save:", e));
     });
     setRequestSent(true);
     setTimeout(() => { setRequestSent(false); setShowRequest(false); setCart([]); setReqMsg(""); }, 2000);
@@ -678,7 +683,7 @@ function BiobankDash({ onNav, user, logout, samples, setSamples, requests, setRe
 
   // Load the user's biobank from DB
   useEffect(() => {
-    biobanksAPI.getMine().then(bb => {
+    biobanksAPI.getMine(user?.id).then(bb => {
       if (bb) setMyBB({ id: bb.id, name: bb.name, location: bb.location, bio: bb.bio, specialties: bb.specialties || [], certifications: bb.certifications || [], verified: bb.verified, rating: 4.8, samples: 0, founded: bb.founded, responseTime: bb.response_time, reviews: 0 });
     }).catch(() => {});
   }, []);
@@ -707,7 +712,8 @@ function BiobankDash({ onNav, user, logout, samples, setSamples, requests, setRe
 
   // Load real threads
   useEffect(() => {
-    threadsAPI.listMine().then(data => {
+    if (!myBB?.id) return;
+    threadsAPI.listForBiobank(myBB.id).then(data => {
       if (data) setRealThreads(data.map(t => ({
         id: t.id, biobankId: t.biobank_id, sampleId: t.sample_id,
         lastMessage: t.last_message, lastDate: t.last_message_at?.slice(0, 10),
@@ -715,7 +721,7 @@ function BiobankDash({ onNav, user, logout, samples, setSamples, requests, setRe
         sampleInfo: t.samples ? `${t.samples.disease} — ${t.samples.subtype}` : "",
       })));
     }).catch(() => {});
-  }, []);
+  }, [myBB?.id]);
 
   const allRequests = realRequests.length > 0 ? realRequests : requests;
   const mySamples = samples.filter(s => s.biobankId === myBB.id);
@@ -997,7 +1003,7 @@ function ProfilePage({ onNav, user, logout }) {
                 </div>
                 <div style={{ marginBottom: 12 }}><label style={lb}>Bio</label><textarea value={form.bio} onChange={e => set("bio", e.target.value)} rows={3} style={{ ...inp, width: "100%", resize: "vertical" }} /></div>
                 <div style={{ display: "flex", gap: 8 }}>
-                  <button onClick={() => { authAPI.updateProfile({ name: form.name, email: form.email, institution: form.institution, location: form.location, bio: form.bio }).catch(e => console.error('SUPABASE ERROR:', e)); setEditing(false); }} style={{ ...btnP, padding: "9px 20px", fontSize: 13 }}>Save</button>
+                  <button onClick={() => { authAPI.updateProfile(user?.id, { name: form.name, email: form.email, institution: form.institution, location: form.location, bio: form.bio }).catch(e => console.error('SAVE ERROR:', e)); setEditing(false); }} style={{ ...btnP, padding: "9px 20px", fontSize: 13 }}>Save</button>
                   <button onClick={() => setEditing(false)} style={{ ...btnS, padding: "9px 20px", fontSize: 13 }}>Cancel</button>
                 </div>
               </div>
@@ -1171,7 +1177,7 @@ function RealMsgPanel({ threads, role, userName, userId }) {
     // Add locally immediately
     setThreadMsgs(prev => [...prev, { id: "m" + Date.now(), from: role, fromName: userName, text: newMsg.trim(), time: "Just now" }]);
     // Save to DB
-    messagesAPI.send({ threadId: activeThread, text: newMsg.trim(), senderName: userName }).catch(e => console.log("Msg send:", e));
+    messagesAPI.send(userId, { threadId: activeThread, text: newMsg.trim(), senderName: userName }).catch(e => console.log("Msg send:", e));
     setNewMsg("");
   };
 
