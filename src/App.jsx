@@ -168,9 +168,9 @@ export default function BioVault() {
   };
 
   const toggleFav = (id) => {
-    console.log("TOGGLE FAV:", id, "user:", user?.id || user?.email || "none");
+    console.log("TOGGLE FAV:", id, "user:", user?.id);
     setFavorites(f => f.includes(id) ? f.filter(x => x !== id) : [...f, id]);
-    if (user) { favoritesAPI.toggle(id).catch(e => console.error('SUPABASE ERROR:', e)); }
+    if (user?.id) { favoritesAPI.toggle(id, user.id).catch(e => console.error('SUPABASE ERROR:', e)); }
   };
 
   const openBB = (bb) => { setViewBiobank(bb); nav("biobankProfile"); };
@@ -426,6 +426,7 @@ function ResearcherView({ onNav, user, logout, samples, messages, setMessages, t
         biobankId: s.biobankId || s.biobank_id,
         quantity: 1,
         message: reqMsg,
+        userId: user?.id,
       }).catch(e => console.log("Request save:", e));
     });
     setRequestSent(true);
