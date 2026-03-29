@@ -407,20 +407,27 @@ export const favorites = {
 
   // Toggle favorite
   async toggle(sampleId) {
-    const { data: { user } } = await supabase.auth.getUser();
+    console.log("FAV TOGGLE START:", sampleId);
+    const { data: { user }, error: authErr } = await supabase.auth.getUser();
+    console.log("FAV AUTH:", user?.id, "error:", authErr);
+    if (!user) { console.error("FAV: No authenticated user!"); return; }
 
     // Check if already favorited
-    const { data: rows } = await supabase
+    const { data: rows, error: selectErr } = await supabase
       .from('favorites')
       .select('id')
       .eq('user_id', user.id)
       .eq('sample_id', sampleId);
 
+    console.log("FAV SELECT:", rows, "error:", selectErr);
+
     if (rows && rows.length > 0) {
-      await supabase.from('favorites').delete().eq('id', rows[0].id);
+      const { error: delErr } = await supabase.from('favorites').delete().eq('id', rows[0].id);
+      console.log("FAV DELETE:", delErr);
       return false; // removed
     } else {
-      await supabase.from('favorites').insert({ user_id: user.id, sample_id: sampleId });
+      const { data: inserted, error: insErr } = await supabase.from('favorites').insert({ user_id: user.id, sample_id: sampleId }).select();
+      console.log("FAV INSERT:", inserted, "error:", insErr);
       return true; // added
     }
   }
