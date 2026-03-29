@@ -1,54 +1,7 @@
 import { useState, useEffect, useRef } from "react";
 import { auth as authAPI, samples as samplesAPI, biobanks as biobanksAPI, requests as requestsAPI, favorites as favoritesAPI, messages as messagesAPI, threads as threadsAPI, supabase } from "./lib/supabase";
 
-// ── Mock Data ──────────────────────────────────────────────
-const BIOBANKS_DATA = [
-  { id: "bb1", name: "NordicBio Repository", location: "Stockholm, Sweden", rating: 4.8, samples: 12400, specialties: ["Oncology", "Neurology"], verified: true, bio: "Leading Nordic biobank specializing in oncology and neurological specimen collection since 2008.", contact: "info@nordicbio.se", certifications: ["ISO 20387", "CAP Accredited"], founded: "2008", responseTime: "< 24h", reviews: 47 },
-  { id: "bb2", name: "Pacific Tissue Collective", location: "San Francisco, USA", rating: 4.6, samples: 8900, specialties: ["Cardiology", "Immunology"], verified: true, bio: "West Coast tissue repository focused on cardiovascular and autoimmune disease research.", contact: "samples@pacifictissue.org", certifications: ["ISO 20387"], founded: "2012", responseTime: "< 48h", reviews: 31 },
-  { id: "bb3", name: "Berlin BioBank Alliance", location: "Berlin, Germany", rating: 4.9, samples: 21000, specialties: ["Oncology", "Rare Disease"], verified: true, bio: "Germany's premier biobank network with the largest rare disease specimen catalog in Europe.", contact: "research@berlinbba.de", certifications: ["ISO 20387", "ISBER Best Practices"], founded: "2005", responseTime: "< 24h", reviews: 63 },
-  { id: "bb4", name: "Tokyo Life Sciences Bank", location: "Tokyo, Japan", rating: 4.7, samples: 15600, specialties: ["Genomics", "Neurology"], verified: true, bio: "Asia-Pacific genomics-focused biorepository with deep neurological disease collections.", contact: "tlsb@tokyolife.jp", certifications: ["ISO 20387"], founded: "2010", responseTime: "< 36h", reviews: 38 },
-  { id: "bb5", name: "Maple Leaf Biorepository", location: "Toronto, Canada", rating: 4.5, samples: 6700, specialties: ["Immunology", "Infectious Disease"], verified: false, bio: "Canadian biobank specializing in infectious disease and immunological research specimens.", contact: "info@mapleleafbio.ca", certifications: ["ISBER Best Practices"], founded: "2015", responseTime: "< 48h", reviews: 19 },
-];
-
-const SAMPLES_DATA = [
-  { id: "s1", biobankId: "bb1", type: "Tissue", subtype: "FFPE", disease: "Breast Cancer", organ: "Breast", preservation: "Formalin-Fixed", quantity: 340, unit: "blocks", price: 85, consent: "Broad Research", matchedData: ["Clinical", "Genomic"], availability: "In Stock" },
-  { id: "s2", biobankId: "bb1", type: "Blood", subtype: "Serum", disease: "Alzheimer's Disease", organ: "Brain", preservation: "Frozen -80°C", quantity: 1200, unit: "aliquots", price: 45, consent: "Disease-Specific", matchedData: ["Clinical"], availability: "In Stock" },
-  { id: "s3", biobankId: "bb2", type: "Tissue", subtype: "Fresh Frozen", disease: "Myocardial Infarction", organ: "Heart", preservation: "Frozen -80°C", quantity: 89, unit: "specimens", price: 150, consent: "Broad Research", matchedData: ["Clinical", "Imaging"], availability: "Limited" },
-  { id: "s4", biobankId: "bb3", type: "DNA", subtype: "Genomic DNA", disease: "Colorectal Cancer", organ: "Colon", preservation: "Frozen -20°C", quantity: 560, unit: "samples", price: 120, consent: "Broad Research", matchedData: ["Clinical", "Genomic", "Proteomic"], availability: "In Stock" },
-  { id: "s5", biobankId: "bb3", type: "Tissue", subtype: "FFPE", disease: "Huntington's Disease", organ: "Brain", preservation: "Formalin-Fixed", quantity: 45, unit: "blocks", price: 200, consent: "Disease-Specific", matchedData: ["Clinical", "Genomic"], availability: "Limited" },
-  { id: "s6", biobankId: "bb4", type: "Blood", subtype: "Plasma", disease: "Parkinson's Disease", organ: "Brain", preservation: "Frozen -80°C", quantity: 890, unit: "aliquots", price: 55, consent: "Broad Research", matchedData: ["Clinical"], availability: "In Stock" },
-  { id: "s7", biobankId: "bb4", type: "RNA", subtype: "Total RNA", disease: "Glioblastoma", organ: "Brain", preservation: "Frozen -80°C", quantity: 210, unit: "samples", price: 175, consent: "Broad Research", matchedData: ["Clinical", "Genomic"], availability: "In Stock" },
-  { id: "s8", biobankId: "bb5", type: "Tissue", subtype: "Fresh Frozen", disease: "Lupus", organ: "Kidney", preservation: "Frozen -80°C", quantity: 120, unit: "specimens", price: 130, consent: "Disease-Specific", matchedData: ["Clinical", "Immunological"], availability: "In Stock" },
-  { id: "s9", biobankId: "bb2", type: "Blood", subtype: "Whole Blood", disease: "Rheumatoid Arthritis", organ: "Systemic", preservation: "EDTA", quantity: 450, unit: "tubes", price: 35, consent: "Broad Research", matchedData: ["Clinical", "Immunological"], availability: "In Stock" },
-  { id: "s10", biobankId: "bb1", type: "DNA", subtype: "cfDNA", disease: "Lung Cancer", organ: "Lung", preservation: "Frozen -20°C", quantity: 180, unit: "samples", price: 250, consent: "Broad Research", matchedData: ["Clinical", "Genomic"], availability: "Limited" },
-];
-
-const MESSAGES_DATA = [
-  { id: "m1", threadId: "t1", from: "researcher", fromName: "Dr. Sarah Chen", text: "Hi, I'm interested in 20 FFPE blocks for our HER2+ breast cancer IHC study. Could you confirm the fixation time?", time: "Mar 20, 09:14" },
-  { id: "m2", threadId: "t1", from: "biobank", fromName: "NordicBio Repository", text: "Hello Dr. Chen! Yes, fixation time is 24-48 hours in 10% NBF. All blocks are from surgical resections. Shall I prepare a quote?", time: "Mar 20, 11:30" },
-  { id: "m3", threadId: "t1", from: "researcher", fromName: "Dr. Sarah Chen", text: "That's perfect. Yes please, and could you include the associated clinical data?", time: "Mar 20, 14:05" },
-  { id: "m4", threadId: "t2", from: "researcher", fromName: "Prof. James Okafor", text: "We need 50 colorectal cancer gDNA samples for WES. What's the average concentration and purity?", time: "Mar 18, 08:22" },
-  { id: "m5", threadId: "t2", from: "biobank", fromName: "Berlin BioBank Alliance", text: "Prof. Okafor, average concentration is 50ng/uL with A260/280 ratios of 1.8-2.0. All samples have matched clinical and proteomic data. MTA has been approved.", time: "Mar 18, 13:45" },
-];
-
-const THREADS_DATA = [
-  { id: "t1", researcherId: "u1", biobankId: "bb1", sampleId: "s1", status: "active", lastMessage: "That's perfect. Yes please...", lastDate: "Mar 20" },
-  { id: "t2", researcherId: "u2", biobankId: "bb3", sampleId: "s4", status: "active", lastMessage: "MTA has been approved.", lastDate: "Mar 18" },
-];
-
-const REQUESTS_DATA = [
-  { id: "r1", researcher: "Dr. Sarah Chen", institution: "MIT", sampleId: "s1", quantity: 20, status: "pending", date: "2026-03-20", message: "Need FFPE blocks for IHC staining study on HER2+ breast cancer.", threadId: "t1" },
-  { id: "r2", researcher: "Prof. James Okafor", institution: "UCL", sampleId: "s4", quantity: 50, status: "approved", date: "2026-03-18", message: "Genomic DNA for whole-exome sequencing in colorectal cancer cohort.", threadId: "t2" },
-  { id: "r3", researcher: "Dr. Yuki Tanaka", institution: "Kyoto University", sampleId: "s7", quantity: 15, status: "pending", date: "2026-03-22", message: "RNA-seq analysis of GBM tumor microenvironment.", threadId: null },
-];
-
-const MY_REQUESTS = [
-  { id: "mr1", sampleId: "s1", biobankId: "bb1", quantity: 20, status: "pending", date: "2026-03-20" },
-  { id: "mr2", sampleId: "s4", biobankId: "bb3", quantity: 50, status: "approved", date: "2026-03-18" },
-  { id: "mr3", sampleId: "s6", biobankId: "bb4", quantity: 100, status: "shipped", date: "2026-03-10" },
-  { id: "mr4", sampleId: "s8", biobankId: "bb5", quantity: 30, status: "rejected", date: "2026-03-05" },
-  { id: "mr5", sampleId: "s3", biobankId: "bb2", quantity: 10, status: "delivered", date: "2026-02-28" },
-];
+// ── No mock data — everything loads from Supabase ──
 
 const statusColors = { pending: "#f59e0b", approved: "#00e5a0", shipped: "#3b82f6", delivered: "#10b981", rejected: "#ef4444" };
 const statusLabels = { pending: "Pending", approved: "Approved", shipped: "Shipped", delivered: "Delivered", rejected: "Declined" };
@@ -119,18 +72,18 @@ export default function BioVault() {
   const [view, setView] = useState("landing");
   const [fadeIn, setFadeIn] = useState(true);
   const [user, setUser] = useState(null);
-  const [samples, setSamples] = useState(SAMPLES_DATA);
-  const [messages, setMessages] = useState(MESSAGES_DATA);
-  const [threads] = useState(THREADS_DATA);
-  const [requests, setRequests] = useState(REQUESTS_DATA);
+  const [samples, setSamples] = useState([]);
+  const [messages, setMessages] = useState([]);
+  const [threads] = useState([]);
+  const [requests, setRequests] = useState([]);
   const [favorites, setFavorites] = useState([]);
   const [viewBiobank, setViewBiobank] = useState(null);
   const [dbReady, setDbReady] = useState(false);
-  const [allBiobanks, setAllBiobanks] = useState(BIOBANKS_DATA);
+  const [allBiobanks, setAllBiobanks] = useState([]);
 
-  // Helper to find biobank by ID — checks DB data first, then mock
+  // Helper to find biobank by ID
   const getBB = (id) => {
-    return allBiobanks.find(b => b.id === id) || BIOBANKS_DATA.find(b => b.id === id) || { id, name: "Biobank", location: "", verified: false, specialties: [], certifications: [], rating: 0, samples: 0, bio: "", reviews: 0, founded: "", responseTime: "< 48h" };
+    return allBiobanks.find(b => b.id === id) || { id, name: "Biobank", location: "", verified: false, specialties: [], certifications: [], rating: 0, samples: 0, bio: "", reviews: 0, founded: "", responseTime: "< 48h" };
   };
 
   // Listen for auth state changes
@@ -162,7 +115,7 @@ export default function BioVault() {
           reviews: b.biobank_ratings?.[0]?.review_count || 0,
           samples: b.samples?.[0]?.count || 0,
         }));
-        setAllBiobanks([...mapped, ...BIOBANKS_DATA]);
+        setAllBiobanks(mapped);
       }
     }).catch(e => console.error('SUPABASE ERROR:', e));
 
@@ -190,8 +143,8 @@ export default function BioVault() {
         setSamples(mapped);
         setDbReady(true);
       }
-    }).catch(() => {
-      console.log("Using mock data (Supabase not connected yet)");
+    }).catch(e => {
+      console.error("SUPABASE ERROR loading samples:", e);
     });
   }, []);
 
@@ -239,7 +192,7 @@ export default function BioVault() {
       `}</style>
       <div style={{ position: "fixed", inset: 0, opacity: 0.03, backgroundImage: `linear-gradient(${T.accent} 1px,transparent 1px),linear-gradient(90deg,${T.accent} 1px,transparent 1px)`, backgroundSize: "40px 40px", animation: "gridMove 8s linear infinite", pointerEvents: "none", zIndex: 0 }} />
       <div style={{ position: "relative", zIndex: 1, opacity: fadeIn ? 1 : 0, transition: "opacity 0.2s ease" }}>
-        {view === "landing" && <Landing onNav={nav} user={user} logout={logout} />}
+        {view === "landing" && <Landing onNav={nav} user={user} logout={logout} sampleCount={samples.length} biobankCount={allBiobanks.length} />}
         {view === "auth" && <AuthScreen onLogin={login} onNav={nav} />}
         {view === "researcher" && <ResearcherView onNav={nav} user={user} logout={logout} samples={samples} messages={messages} setMessages={setMessages} threads={threads} favorites={favorites} toggleFav={toggleFav} openBB={openBB} getBB={getBB} />}
         {view === "biobank" && <BiobankDash onNav={nav} user={user} logout={logout} samples={samples} setSamples={setSamples} requests={requests} setRequests={setRequests} messages={messages} setMessages={setMessages} threads={threads} getBB={getBB} />}
@@ -274,7 +227,7 @@ function NavBar({ onNav, user, logout, extra }) {
 }
 
 // ── Landing ────────────────────────────────────────────────
-function Landing({ onNav, user, logout }) {
+function Landing({ onNav, user, logout, sampleCount, biobankCount }) {
   const [loaded, setLoaded] = useState(false);
   useEffect(() => { setTimeout(() => setLoaded(true), 100); }, []);
   return (
@@ -297,7 +250,7 @@ function Landing({ onNav, user, logout }) {
           <button onClick={() => onNav(user ? "biobank" : "auth")} style={{ ...btnS, padding: "16px 32px", fontSize: 15 }}>{I.bank}<span style={{ marginLeft: 8 }}>Biobank Dashboard</span></button>
         </div>
         <div style={{ display: "flex", gap: 48, marginTop: 64, animation: loaded ? "slideUp 1.2s ease forwards" : "none", opacity: loaded ? 1 : 0, flexWrap: "wrap", justifyContent: "center" }}>
-          {[{ v: "64,600+", l: "Samples Listed" }, { v: "5", l: "Partner Biobanks" }, { v: "12", l: "Disease Areas" }].map((s, i) => (
+          {[{ v: sampleCount || 0, l: "Samples Listed" }, { v: biobankCount || 0, l: "Partner Biobanks" }, { v: "Global", l: "Marketplace" }].map((s, i) => (
             <div key={i} style={{ textAlign: "center" }}>
               <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontSize: 28, fontWeight: 700, color: T.accent }}>{s.v}</div>
               <div style={{ fontSize: 12, color: T.textMuted, marginTop: 4 }}>{s.l}</div>
@@ -569,7 +522,8 @@ function ResearcherView({ onNav, user, logout, samples, messages, setMessages, t
               </div>
             );
           })}
-          {filtered.length === 0 && <div style={{ textAlign: "center", padding: 60, color: T.textMuted }}>No matches. <button onClick={clearF} style={{ ...btnG, display: "inline", color: T.accent }}>Clear filters</button></div>}
+          {filtered.length === 0 && samples.length === 0 && <div style={{ textAlign: "center", padding: 60, color: T.textMuted }}>Loading samples from database...</div>}
+          {filtered.length === 0 && samples.length > 0 && <div style={{ textAlign: "center", padding: 60, color: T.textMuted }}>No matches. <button onClick={clearF} style={{ ...btnG, display: "inline", color: T.accent }}>Clear filters</button></div>}
         </div>
       </div>
 
@@ -635,11 +589,10 @@ function ResearcherView({ onNav, user, logout, samples, messages, setMessages, t
       {showTracker && (
         <Modal onClose={() => setShowTracker(false)}>
           <h3 style={{ fontFamily: "'Space Grotesk',sans-serif", fontSize: 18, fontWeight: 600, marginBottom: 18 }}>My Requests</h3>
-          {(myRealRequests.length > 0 ? myRealRequests : MY_REQUESTS).map((r, i) => {
-            const isReal = !!r.disease;
-            const disease = isReal ? r.disease : (SAMPLES_DATA.find(x => x.id === r.sampleId)?.disease || "Sample");
-            const subtype = isReal ? r.subtype : (SAMPLES_DATA.find(x => x.id === r.sampleId)?.subtype || "");
-            const bbName = isReal ? r.biobankName : (getBB(r.biobankId)?.name || "Biobank");
+          {myRealRequests.length === 0 ? <p style={{ color: T.textMuted, textAlign: "center", padding: 36 }}>No requests yet. Send a request from the marketplace.</p> : myRealRequests.map((r, i) => {
+            const disease = r.disease || "Sample";
+            const subtype = r.subtype || "";
+            const bbName = r.biobankName || "Biobank";
             const sc = statusColors[r.status];
             const steps = ["pending", "approved", "shipped", "delivered"];
             const si = steps.indexOf(r.status);
@@ -713,65 +666,10 @@ function SampleDetail({ sample, biobank, onAdd, inCart, isFav, toggleFav, onView
 }
 
 // ── Messaging ──────────────────────────────────────────────
-function MsgPanel({ messages, setMessages, threads, role, userName }) {
-  const [activeThread, setActiveThread] = useState(null);
-  const [newMsg, setNewMsg] = useState("");
-  const endRef = useRef(null);
-  const tMsgs = activeThread ? messages.filter(m => m.threadId === activeThread) : [];
-  useEffect(() => { endRef.current?.scrollIntoView({ behavior: "smooth" }); }, [tMsgs.length, activeThread]);
-
-  const send = () => {
-    if (!newMsg.trim() || !activeThread) return;
-    setMessages([...messages, { id: "m" + Date.now(), threadId: activeThread, from: role, fromName: userName, text: newMsg.trim(), time: "Just now" }]);
-    setNewMsg("");
-  };
-
-  return (
-    <div>
-      <h3 style={{ fontFamily: "'Space Grotesk',sans-serif", fontSize: 18, fontWeight: 600, marginBottom: 14 }}>Messages</h3>
-      {!activeThread ? (
-        threads.length === 0 ? <p style={{ color: T.textMuted, textAlign: "center", padding: 36 }}>No conversations yet.</p> : (
-          threads.map(t => {
-            const sample = SAMPLES_DATA.find(s => s.id === t.sampleId);
-            const bb = BIOBANKS_DATA.find(b => b.id === t.biobankId);
-            return (
-              <div key={t.id} onClick={() => setActiveThread(t.id)} style={{ padding: 14, borderRadius: 10, border: `1px solid ${T.border}`, marginBottom: 8, cursor: "pointer", background: T.bg, transition: "border-color 0.2s" }}>
-                <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 5 }}>
-                  <span style={{ fontSize: 13, fontWeight: 600 }}>{role === "researcher" ? bb?.name : "Researcher"}</span>
-                  <span style={{ fontSize: 11, color: T.textMuted }}>{t.lastDate}</span>
-                </div>
-                <div style={{ fontSize: 12, color: T.accent, marginBottom: 3 }}>{sample?.disease} — {sample?.subtype}</div>
-                <div style={{ fontSize: 12, color: T.textMuted, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{t.lastMessage}</div>
-              </div>
-            );
-          })
-        )
-      ) : (
-        <div>
-          <button onClick={() => setActiveThread(null)} style={{ ...btnG, marginBottom: 10, padding: "6px 0" }}>{I.back} Back</button>
-          <div style={{ maxHeight: 300, overflowY: "auto", marginBottom: 14, padding: 2 }}>
-            {tMsgs.map(m => (
-              <div key={m.id} style={{ marginBottom: 10, display: "flex", flexDirection: "column", alignItems: m.from === role ? "flex-end" : "flex-start" }}>
-                <div style={{ fontSize: 11, color: T.textMuted, marginBottom: 3 }}>{m.fromName} · {m.time}</div>
-                <div style={{ padding: "9px 13px", borderRadius: 12, maxWidth: "85%", fontSize: 13, lineHeight: 1.6, background: m.from === role ? T.accentDim : T.surfaceLight, color: m.from === role ? T.accent : T.text, border: `1px solid ${m.from === role ? "rgba(0,229,160,0.2)" : T.border}` }}>{m.text}</div>
-              </div>
-            ))}
-            <div ref={endRef} />
-          </div>
-          <div style={{ display: "flex", gap: 8 }}>
-            <input value={newMsg} onChange={e => setNewMsg(e.target.value)} onKeyDown={e => e.key === "Enter" && send()} placeholder="Type a message..." style={{ ...inp, flex: 1 }} />
-            <button onClick={send} style={{ ...btnP, padding: "10px 14px" }}>{I.send}</button>
-          </div>
-        </div>
-      )}
-    </div>
-  );
-}
-
 // ── Biobank Dashboard ──────────────────────────────────────
 function BiobankDash({ onNav, user, logout, samples, setSamples, requests, setRequests, messages, setMessages, threads, getBB }) {
   const [tab, setTab] = useState("overview");
-  const [myBB, setMyBB] = useState(BIOBANKS_DATA[0]);
+  const [myBB, setMyBB] = useState({ id: null, name: "My Biobank", location: "", specialties: [], certifications: [], verified: false, rating: 0, samples: 0, bio: "", reviews: 0, founded: "", responseTime: "< 48h" });
   const [realRequests, setRealRequests] = useState([]);
   const [realThreads, setRealThreads] = useState([]);
   const [realMessages, setRealMessages] = useState([]);
@@ -862,7 +760,7 @@ function BiobankDash({ onNav, user, logout, samples, setSamples, requests, setRe
 
 function OverviewTab({ bb, samples, requests }) {
   const stats = [
-    { l: "Total Samples", v: bb.samples.toLocaleString(), c: T.accent },
+    { l: "Total Samples", v: (bb.samples || 0).toLocaleString(), c: T.accent },
     { l: "Listed", v: samples.length, c: T.info },
     { l: "Pending", v: requests.filter(r => r.status === "pending").length, c: T.warning },
     { l: "Fulfilled", v: requests.filter(r => r.status === "approved").length, c: T.accent },
@@ -1027,7 +925,7 @@ function RequestsTab({ requests, onUpdate }) {
       {requests.length === 0 ? <p style={{ color: T.textMuted, textAlign: "center", padding: 36 }}>No requests yet.</p> : (
       <div style={{ display: "grid", gap: 10 }}>
         {requests.map((r, i) => {
-          const s = r._sample || SAMPLES_DATA.find(x => x.id === r.sampleId);
+          const s = r._sample || null;
           return (
             <div key={r.id} style={{ ...crd, animation: `slideUp 0.4s ease ${i * 0.06}s both` }}>
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "start", marginBottom: 10 }}>
@@ -1177,7 +1075,7 @@ function BBProfile({ onNav, user, logout, bb, samples, favorites, toggleFav }) {
         </div>
 
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(140px,1fr))", gap: 10, marginBottom: 20 }}>
-          {[{ l: "Specimens", v: bb.samples.toLocaleString(), c: T.accent }, { l: "Listed", v: bbS.length, c: T.info }, { l: "Founded", v: bb.founded, c: "#8b5cf6" }, { l: "Specialties", v: bb.specialties.length, c: T.warning }].map((s, i) => (
+          {[{ l: "Specimens", v: (bb.samples || 0).toLocaleString(), c: T.accent }, { l: "Listed", v: bbS.length, c: T.info }, { l: "Founded", v: bb.founded || "N/A", c: "#8b5cf6" }, { l: "Specialties", v: (bb.specialties || []).length, c: T.warning }].map((s, i) => (
             <div key={i} style={{ ...crd, padding: 16, textAlign: "center", animation: `slideUp 0.4s ease ${i * 0.08}s both` }}>
               <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontSize: 22, fontWeight: 700, color: s.c }}>{s.v}</div>
               <div style={{ fontSize: 11, color: T.textMuted, marginTop: 3 }}>{s.l}</div>
