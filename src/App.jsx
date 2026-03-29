@@ -573,7 +573,7 @@ function ResearcherView({ onNav, user, logout, samples, messages, setMessages, t
                       <span style={{ ...tg, fontSize: 11 }}>{s.subtype}</span>
                     </div>
                     <div style={{ fontSize: 14, fontWeight: 500 }}>{s.disease}</div>
-                    <div style={{ fontSize: 12, color: T.textMuted }}>{bb.name} · ${s.price}/unit</div>
+                    <div style={{ fontSize: 12, color: T.textMuted }}>{bb.name} · {`$${s.price}/unit`}</div>
                   </div>
                   <div style={{ display: "flex", gap: 6 }}>
                     <button onClick={() => addCart(s)} style={{ ...btnP, padding: "6px 12px", fontSize: 11 }}>Add</button>
