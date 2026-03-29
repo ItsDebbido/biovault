@@ -949,6 +949,7 @@ function RequestsTab({ requests, onUpdate }) {
           );
         })}
       </div>
+      )}
     </div>
   );
 }
