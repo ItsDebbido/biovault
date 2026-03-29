@@ -188,13 +188,13 @@ export const biobanks = {
   // Get biobank owned by current user
   async getMine() {
     const { data: { user } } = await supabase.auth.getUser();
+    if (!user) return null;
     const { data, error } = await supabase
       .from('biobanks')
       .select('*')
-      .eq('owner_id', user.id)
-      .single();
+      .eq('owner_id', user.id);
     if (error) throw error;
-    return data;
+    return data && data.length > 0 ? data[0] : null;
   },
 
   // Update biobank
@@ -213,12 +213,14 @@ export const biobanks = {
 // ── REQUESTS ───────────────────────────────
 export const requests = {
   // Create a sample request
-  async create({ sampleId, biobankId, quantity, message }) {
-    const { data: { user } } = await supabase.auth.getUser();
+  async create({ sampleId, biobankId, quantity, message, userId }) {
+    console.log("REQUEST CREATE:", sampleId, "user:", userId);
+    if (!userId) { console.error("REQUEST: No user ID!"); return; }
+
     const { data, error } = await supabase
       .from('requests')
       .insert({
-        researcher_id: user.id,
+        researcher_id: userId,
         sample_id: sampleId,
         biobank_id: biobankId,
         quantity,
@@ -227,15 +229,18 @@ export const requests = {
       })
       .select()
       .maybeSingle();
+    
+    console.log("REQUEST INSERT:", data, "error:", error);
     if (error) throw error;
 
-    // Auto-create a thread (non-blocking, don't fail if this errors)
+    // Auto-create a thread (non-blocking)
     try {
       await threads.create({
         biobankId,
         sampleId,
         requestId: data?.id,
-        firstMessage: message
+        firstMessage: message,
+        userId
       });
     } catch (e) { console.log("Thread creation skipped:", e); }
 
@@ -289,12 +294,12 @@ export const requests = {
 // ── THREADS & MESSAGES ─────────────────────
 export const threads = {
   // Create a thread
-  async create({ biobankId, sampleId, requestId, firstMessage }) {
-    const { data: { user } } = await supabase.auth.getUser();
+  async create({ biobankId, sampleId, requestId, firstMessage, userId }) {
+    if (!userId) return;
     const { data: thread, error } = await supabase
       .from('threads')
       .insert({
-        researcher_id: user.id,
+        researcher_id: userId,
         biobank_id: biobankId,
         sample_id: sampleId,
         request_id: requestId,
@@ -302,16 +307,16 @@ export const threads = {
         last_message_at: new Date().toISOString()
       })
       .select()
-      .single();
+      .maybeSingle();
     if (error) throw error;
 
     // Send first message if provided
-    if (firstMessage) {
-      const profile = await auth.getProfile();
+    if (firstMessage && thread) {
       await messages.send({
         threadId: thread.id,
         text: firstMessage,
-        senderName: profile.name
+        senderName: "Researcher",
+        userId
       });
     }
     return thread;
@@ -344,18 +349,23 @@ export const threads = {
 
 export const messages = {
   // Send a message
-  async send({ threadId, text, senderName }) {
-    const { data: { user } } = await supabase.auth.getUser();
+  async send({ threadId, text, senderName, userId }) {
+    if (!userId) {
+      const { data: { user } } = await supabase.auth.getUser();
+      userId = user?.id;
+    }
+    if (!userId) return;
+    
     const { data, error } = await supabase
       .from('messages')
       .insert({
         thread_id: threadId,
-        sender_id: user.id,
+        sender_id: userId,
         sender_name: senderName,
         text
       })
       .select()
-      .single();
+      .maybeSingle();
     if (error) throw error;
 
     // Update thread's last message
@@ -406,29 +416,27 @@ export const favorites = {
   },
 
   // Toggle favorite
-  async toggle(sampleId) {
-    console.log("FAV TOGGLE START:", sampleId);
-    const { data: { user }, error: authErr } = await supabase.auth.getUser();
-    console.log("FAV AUTH:", user?.id, "error:", authErr);
-    if (!user) { console.error("FAV: No authenticated user!"); return; }
+  async toggle(sampleId, userId) {
+    console.log("FAV TOGGLE:", sampleId, "user:", userId);
+    if (!userId) { console.error("FAV: No user ID!"); return; }
 
     // Check if already favorited
     const { data: rows, error: selectErr } = await supabase
       .from('favorites')
       .select('id')
-      .eq('user_id', user.id)
+      .eq('user_id', userId)
       .eq('sample_id', sampleId);
 
     console.log("FAV SELECT:", rows, "error:", selectErr);
 
     if (rows && rows.length > 0) {
       const { error: delErr } = await supabase.from('favorites').delete().eq('id', rows[0].id);
-      console.log("FAV DELETE:", delErr);
-      return false; // removed
+      console.log("FAV DELETE error:", delErr);
+      return false;
     } else {
-      const { data: inserted, error: insErr } = await supabase.from('favorites').insert({ user_id: user.id, sample_id: sampleId }).select();
+      const { data: inserted, error: insErr } = await supabase.from('favorites').insert({ user_id: userId, sample_id: sampleId }).select();
       console.log("FAV INSERT:", inserted, "error:", insErr);
-      return true; // added
+      return true;
     }
   }
 };
