@@ -1,5 +1,106 @@
 import { useState, useEffect, useRef } from "react";
-import { auth as authAPI, samples as samplesAPI, biobanks as biobanksAPI, requests as requestsAPI, favorites as favoritesAPI, messages as messagesAPI, threads as threadsAPI, supabase } from "./lib/supabase";
+import { createClient } from '@supabase/supabase-js';
+
+const supabase = createClient(
+  import.meta.env.VITE_SUPABASE_URL,
+  import.meta.env.VITE_SUPABASE_ANON_KEY
+);
+
+// Direct DB helpers — no separate file, no getUser() calls
+const db = {
+  async loadSamples() {
+    const { data, error } = await supabase.from('samples').select('*, biobanks(id, name, location, verified, specialties)').order('created_at', { ascending: false });
+    if (error) console.error("LOAD SAMPLES:", error);
+    return data || [];
+  },
+  async loadBiobanks() {
+    const { data, error } = await supabase.from('biobanks').select('*');
+    if (error) console.error("LOAD BIOBANKS:", error);
+    return data || [];
+  },
+  async addFavorite(userId, sampleId) {
+    console.log("DB addFavorite:", userId, sampleId);
+    const { data, error } = await supabase.from('favorites').insert({ user_id: userId, sample_id: sampleId }).select();
+    console.log("DB addFavorite RESULT:", data, "ERROR:", error);
+    return { data, error };
+  },
+  async removeFavorite(userId, sampleId) {
+    console.log("DB removeFavorite:", userId, sampleId);
+    const { error } = await supabase.from('favorites').delete().eq('user_id', userId).eq('sample_id', sampleId);
+    console.log("DB removeFavorite ERROR:", error);
+    return { error };
+  },
+  async loadFavorites(userId) {
+    const { data, error } = await supabase.from('favorites').select('sample_id').eq('user_id', userId);
+    if (error) console.error("LOAD FAVS:", error);
+    return (data || []).map(f => f.sample_id);
+  },
+  async createRequest(userId, sampleId, biobankId, quantity, message) {
+    console.log("DB createRequest:", { userId, sampleId, biobankId });
+    const { data, error } = await supabase.from('requests').insert({ researcher_id: userId, sample_id: sampleId, biobank_id: biobankId, quantity, message, status: 'pending' }).select();
+    console.log("DB createRequest RESULT:", data, "ERROR:", error);
+    return { data, error };
+  },
+  async loadMyRequests(userId) {
+    const { data, error } = await supabase.from('requests').select('*, samples(disease, subtype), biobanks(name, location)').eq('researcher_id', userId).order('created_at', { ascending: false });
+    if (error) console.error("LOAD MY REQUESTS:", error);
+    return data || [];
+  },
+  async loadBiobankRequests(biobankId) {
+    const { data, error } = await supabase.from('requests').select('*, samples(disease, subtype), profiles!researcher_id(name, institution)').eq('biobank_id', biobankId).order('created_at', { ascending: false });
+    if (error) console.error("LOAD BB REQUESTS:", error);
+    return data || [];
+  },
+  async updateRequestStatus(id, status) {
+    const { error } = await supabase.from('requests').update({ status }).eq('id', id);
+    console.log("DB updateStatus:", error);
+    return { error };
+  },
+  async createSample(sample) {
+    console.log("DB createSample:", sample);
+    const { data, error } = await supabase.from('samples').insert(sample).select().maybeSingle();
+    console.log("DB createSample RESULT:", data, "ERROR:", error);
+    return { data, error };
+  },
+  async getMyBiobank(userId) {
+    const { data, error } = await supabase.from('biobanks').select('*').eq('owner_id', userId);
+    if (error) console.error("LOAD MY BB:", error);
+    return data && data.length > 0 ? data[0] : null;
+  },
+  async getProfile(userId) {
+    const { data } = await supabase.from('profiles').select('*').eq('id', userId).maybeSingle();
+    return data;
+  },
+  async updateProfile(userId, updates) {
+    const { error } = await supabase.from('profiles').update(updates).eq('id', userId);
+    console.log("DB updateProfile:", error);
+    return { error };
+  },
+  async loadThreads(userId, role, biobankId) {
+    if (role === 'biobank' && biobankId) {
+      const { data } = await supabase.from('threads').select('*, profiles!researcher_id(name), samples(disease, subtype)').eq('biobank_id', biobankId).order('last_message_at', { ascending: false });
+      return data || [];
+    }
+    const { data } = await supabase.from('threads').select('*, biobanks(name), samples(disease, subtype)').eq('researcher_id', userId).order('last_message_at', { ascending: false });
+    return data || [];
+  },
+  async createThread(userId, biobankId, sampleId, message) {
+    const { data, error } = await supabase.from('threads').insert({ researcher_id: userId, biobank_id: biobankId, sample_id: sampleId, last_message: message?.slice(0, 100), last_message_at: new Date().toISOString() }).select().maybeSingle();
+    console.log("DB createThread:", data, error);
+    return data;
+  },
+  async loadMessages(threadId) {
+    const { data } = await supabase.from('messages').select('*').eq('thread_id', threadId).order('created_at', { ascending: true });
+    return data || [];
+  },
+  async sendMessage(userId, threadId, text, senderName) {
+    console.log("DB sendMessage:", { userId, threadId });
+    const { data, error } = await supabase.from('messages').insert({ thread_id: threadId, sender_id: userId, sender_name: senderName, text }).select();
+    console.log("DB sendMessage RESULT:", data, "ERROR:", error);
+    supabase.from('threads').update({ last_message: text.slice(0, 100), last_message_at: new Date().toISOString() }).eq('id', threadId).then(() => {});
+    return { data, error };
+  },
+};
 
 // ── No mock data — everything loads from Supabase ──
 
@@ -90,11 +191,8 @@ export default function BioVault() {
   useEffect(() => {
     const { data: { subscription } } = supabase.auth.onAuthStateChange(async (event, session) => {
       if (session?.user) {
-        try {
-          const profile = await authAPI.getProfile(session.user.id);
-          if (profile) setUser(profile);
-          else setUser({ id: session.user.id, email: session.user.email, name: session.user.email, role: session.user.user_metadata?.role || "researcher" });
-        } catch (e) { console.log("Profile fetch error:", e); }
+        const profile = await db.getProfile(session.user.id);
+        setUser(profile || { id: session.user.id, email: session.user.email, name: session.user.email, role: session.user.user_metadata?.role || "researcher" });
       } else {
         setUser(null);
       }
@@ -105,7 +203,7 @@ export default function BioVault() {
   // Load samples and biobanks from Supabase
   useEffect(() => {
     // Load biobanks
-    biobanksAPI.list().then(data => {
+    db.loadBiobanks().then(data => {
       if (data && data.length > 0) {
         const mapped = data.map(b => ({
           id: b.id, name: b.name, location: b.location, bio: b.bio,
@@ -121,7 +219,7 @@ export default function BioVault() {
     }).catch(e => console.error('SUPABASE ERROR:', e));
 
     // Load samples
-    samplesAPI.list().then(data => {
+    db.loadSamples().then(data => {
       if (data && data.length > 0) {
         // Map Supabase data to our format
         const mapped = data.map(s => ({
@@ -152,7 +250,7 @@ export default function BioVault() {
   // Load favorites when user logs in
   useEffect(() => {
     if (user?.id && dbReady) {
-      favoritesAPI.list(user.id).then(data => {
+      db.loadFavorites(user.id).then(data => {
         if (data) setFavorites(data.map(f => f.sample_id));
       }).catch(e => console.error('SUPABASE ERROR:', e));
     }
@@ -163,17 +261,23 @@ export default function BioVault() {
   const login = (u) => { setUser(u); nav(u.role === "researcher" ? "researcher" : "biobank"); };
 
   const logout = () => {
-    authAPI.signOut().catch(e => console.error('SUPABASE ERROR:', e));
+    supabase.auth.signOut().catch(e => console.error('SUPABASE ERROR:', e));
     setUser(null);
     nav("landing");
   };
 
-  const toggleFav = (id) => {
+  const toggleFav = async (id) => {
+    if (!user?.id) return;
     const isFav = favorites.includes(id);
+    // Optimistic update
     setFavorites(f => isFav ? f.filter(x => x !== id) : [...f, id]);
-    if (user?.id) {
-      if (isFav) { favoritesAPI.remove(user.id, id).catch(e => console.error('FAV ERROR:', e)); }
-      else { favoritesAPI.add(user.id, id).catch(e => console.error('FAV ERROR:', e)); }
+    // Confirm with DB
+    const result = isFav
+      ? await db.removeFavorite(user.id, id)
+      : await db.addFavorite(user.id, id);
+    if (result.error) {
+      console.error("FAV ERROR - reverting:", result.error);
+      setFavorites(f => isFav ? [...f, id] : f.filter(x => x !== id)); // revert
     }
   };
 
@@ -284,24 +388,20 @@ function AuthScreen({ onLogin, onNav }) {
     setLoading(true);
     try {
       if (mode === "signup") {
-        await authAPI.signUp({
-          email: form.email,
-          password: form.password,
-          name: form.name,
-          role,
-          institution: form.institution,
-          biobankName: form.biobankName,
-          location: form.location,
+        const { error: signUpErr } = await supabase.auth.signUp({
+          email: form.email, password: form.password,
+          options: { data: { name: form.name, role, institution: form.institution, biobankName: form.biobankName, location: form.location } }
         });
-        // Get user ID from session
+        if (signUpErr) throw signUpErr;
         const { data: { session } } = await supabase.auth.getSession();
         const uid = session?.user?.id;
-        const profile = uid ? await authAPI.getProfile(uid) : null;
+        const profile = uid ? await db.getProfile(uid) : null;
         onLogin(profile || { id: uid || "new", name: form.name, email: form.email, role, institution: form.institution, joined: "March 2026" });
       } else {
-        const { user: signedIn } = await authAPI.signIn({ email: form.email, password: form.password });
-        const uid = signedIn?.id;
-        const profile = uid ? await authAPI.getProfile(uid) : null;
+        const { data: signInData, error: signInErr } = await supabase.auth.signInWithPassword({ email: form.email, password: form.password });
+        if (signInErr) throw signInErr;
+        const uid = signInData?.user?.id;
+        const profile = uid ? await db.getProfile(uid) : null;
         if (profile) {
           onLogin(profile);
         } else {
@@ -384,7 +484,7 @@ function ResearcherView({ onNav, user, logout, samples, messages, setMessages, t
   // Load real threads for researcher
   useEffect(() => {
     if (!user?.id) return;
-    threadsAPI.listForResearcher(user.id).then(data => {
+    db.loadThreads(user.id, "researcher").then(data => {
       if (data) setRealThreads(data.map(t => ({
         id: t.id, biobankId: t.biobank_id, sampleId: t.sample_id,
         lastMessage: t.last_message, lastDate: t.last_message_at?.slice(0, 10),
@@ -394,7 +494,7 @@ function ResearcherView({ onNav, user, logout, samples, messages, setMessages, t
     }).catch(() => {});
 
     // Load real requests for tracker
-    requestsAPI.listMine(user.id).then(data => {
+    db.loadMyRequests(user.id).then(data => {
       if (data) setMyRealRequests(data.map(r => ({
         id: r.id, sampleId: r.sample_id, biobankId: r.biobank_id,
         quantity: r.quantity, status: r.status, date: r.created_at?.slice(0, 10),
@@ -423,17 +523,18 @@ function ResearcherView({ onNav, user, logout, samples, messages, setMessages, t
   });
   const addCart = (s) => { if (!cart.find(c => c.id === s.id)) setCart([...cart, s]); };
   const [reqMsg, setReqMsg] = useState("");
-  const sendReq = () => {
-    cart.forEach(s => {
-      requestsAPI.create(user?.id, {
-        sampleId: s.id,
-        biobankId: s.biobankId || s.biobank_id,
-        quantity: 1,
-        message: reqMsg,
-      }).then(() => {
-        threadsAPI.create(user?.id, { biobankId: s.biobankId || s.biobank_id, sampleId: s.id, message: reqMsg }).catch(() => {});
-      }).catch(e => console.error("Request save:", e));
-    });
+  const [sendingReq, setSendingReq] = useState(false);
+  const sendReq = async () => {
+    if (!user?.id) return;
+    setSendingReq(true);
+    let anyFailed = false;
+    for (const s of cart) {
+      const { error } = await db.createRequest(user.id, s.id, s.biobankId || s.biobank_id, 1, reqMsg);
+      if (error) { anyFailed = true; console.error("Request failed:", error); }
+      else { db.createThread(user.id, s.biobankId || s.biobank_id, s.id, reqMsg).catch(() => {}); }
+    }
+    setSendingReq(false);
+    if (anyFailed) { alert("Some requests failed to save. Check console for details."); }
     setRequestSent(true);
     setTimeout(() => { setRequestSent(false); setShowRequest(false); setCart([]); setReqMsg(""); }, 2000);
   };
@@ -555,7 +656,7 @@ function ResearcherView({ onNav, user, logout, samples, messages, setMessages, t
                 </div>
               ))}
               <textarea value={reqMsg} onChange={e => setReqMsg(e.target.value)} placeholder="Message to biobank(s)..." style={{ ...inp, width: "100%", minHeight: 70, marginTop: 14, resize: "vertical" }} />
-              <button onClick={sendReq} style={{ ...btnP, width: "100%", marginTop: 14, padding: "13px 0", fontSize: 14 }}>{I.send}<span style={{ marginLeft: 8 }}>Send Request</span></button>
+              <button onClick={sendReq} disabled={sendingReq} style={{ ...btnP, width: "100%", marginTop: 14, padding: "13px 0", fontSize: 14, opacity: sendingReq ? 0.6 : 1 }}>{sendingReq ? "Sending..." : <>{I.send}<span style={{ marginLeft: 8 }}>Send Request</span></>}</button>
             </>
           )}
         </Modal>
@@ -683,7 +784,7 @@ function BiobankDash({ onNav, user, logout, samples, setSamples, requests, setRe
 
   // Load the user's biobank from DB
   useEffect(() => {
-    biobanksAPI.getMine(user?.id).then(bb => {
+    db.getMyBiobank(user?.id).then(bb => {
       if (bb) setMyBB({ id: bb.id, name: bb.name, location: bb.location, bio: bb.bio, specialties: bb.specialties || [], certifications: bb.certifications || [], verified: bb.verified, rating: 4.8, samples: 0, founded: bb.founded, responseTime: bb.response_time, reviews: 0 });
     }).catch(() => {});
   }, []);
@@ -691,7 +792,7 @@ function BiobankDash({ onNav, user, logout, samples, setSamples, requests, setRe
   // Load real requests for this biobank
   useEffect(() => {
     if (!myBB?.id) return;
-    requestsAPI.listForBiobank(myBB.id).then(data => {
+    db.loadBiobankRequests(myBB.id).then(data => {
       if (data) {
         const mapped = data.map(r => ({
           id: r.id, researcher: r.profiles?.name || "Researcher", institution: r.profiles?.institution || "",
@@ -704,16 +805,17 @@ function BiobankDash({ onNav, user, logout, samples, setSamples, requests, setRe
     }).catch(() => setLoadingReqs(false));
 
     // Subscribe to realtime request updates
-    const channel = requestsAPI.subscribeToUpdates((payload) => {
+    const channel = supabase.channel('request-updates')
+      .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'requests' }, (payload) => {
       setRealRequests(prev => prev.map(r => r.id === payload.new.id ? { ...r, status: payload.new.status } : r));
-    });
+    }).subscribe();
     return () => { if (channel) channel.unsubscribe(); };
   }, [myBB?.id]);
 
   // Load real threads
   useEffect(() => {
     if (!myBB?.id) return;
-    threadsAPI.listForBiobank(myBB.id).then(data => {
+    db.loadThreads(null, "biobank", myBB.id).then(data => {
       if (data) setRealThreads(data.map(t => ({
         id: t.id, biobankId: t.biobank_id, sampleId: t.sample_id,
         lastMessage: t.last_message, lastDate: t.last_message_at?.slice(0, 10),
@@ -729,7 +831,7 @@ function BiobankDash({ onNav, user, logout, samples, setSamples, requests, setRe
   const updateReq = (id, st) => {
     setRealRequests(prev => prev.map(r => r.id === id ? { ...r, status: st } : r));
     setRequests(requests.map(r => r.id === id ? { ...r, status: st } : r));
-    requestsAPI.updateStatus(id, st).catch(e => console.log("Status update:", e));
+    db.updateRequestStatus(id, st).catch(e => console.log("Status update:", e));
   };
 
   const tabs = [
@@ -833,6 +935,8 @@ function InventoryTab({ samples, onAdd }) {
 function AddSampleForm({ bb, samples, setSamples, onDone }) {
   const [form, setForm] = useState({ type: "Tissue", subtype: "", disease: "", organ: "", preservation: "", quantity: "", unit: "samples", price: "", consent: "Broad Research", matchedData: [], availability: "In Stock" });
   const [success, setSuccess] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
   const set = (k, v) => setForm({ ...form, [k]: v });
   const toggleD = (d) => set("matchedData", form.matchedData.includes(d) ? form.matchedData.filter(x => x !== d) : [...form.matchedData, d]);
 
@@ -843,20 +947,34 @@ function AddSampleForm({ bb, samples, setSamples, onDone }) {
     RNA: ["Total RNA", "mRNA", "miRNA", "lncRNA"],
   };
 
-  const submit = () => {
-    if (!form.subtype || !form.disease || !form.organ || !form.quantity || !form.price) return;
-    const localSample = { ...form, id: "s" + Date.now(), biobankId: bb.id, quantity: parseInt(form.quantity), price: parseInt(form.price), matchedData: form.matchedData };
-    setSamples([...samples, localSample]);
-    // Save to DB in background
-    samplesAPI.create({
-      biobank_id: bb.id,
-      type: form.type, subtype: form.subtype, disease: form.disease, organ: form.organ,
-      preservation: form.preservation, quantity: parseInt(form.quantity), unit: form.unit,
-      price: parseInt(form.price), consent: form.consent, matched_data: form.matchedData,
-      availability: form.availability,
-    }).catch(e => console.log("Sample save:", e));
-    setSuccess(true);
-    setTimeout(() => { setSuccess(false); onDone(); }, 1500);
+  const submit = async () => {
+    setError("");
+    if (!form.subtype || !form.disease || !form.organ || !form.quantity || !form.price) { setError("Please fill in all required fields."); return; }
+    if (!bb?.id) { setError("No biobank profile found. Sign in as a biobank first."); return; }
+    setSaving(true);
+    try {
+      const { data, error: dbErr } = await db.createSample({
+        biobank_id: bb.id,
+        type: form.type, subtype: form.subtype, disease: form.disease, organ: form.organ,
+        preservation: form.preservation, quantity: parseInt(form.quantity), unit: form.unit,
+        price: parseInt(form.price), consent: form.consent, matched_data: form.matchedData,
+        availability: form.availability,
+      });
+      if (dbErr) { setError("Failed to save: " + dbErr.message); setSaving(false); return; }
+      // Only add to UI after DB confirms
+      const newSample = {
+        id: data?.id || "s" + Date.now(), biobankId: bb.id, type: form.type, subtype: form.subtype,
+        disease: form.disease, organ: form.organ, preservation: form.preservation,
+        quantity: parseInt(form.quantity), unit: form.unit, price: parseInt(form.price),
+        consent: form.consent, matchedData: form.matchedData, availability: form.availability,
+      };
+      setSamples([...samples, newSample]);
+      setSuccess(true);
+      setTimeout(() => { setSuccess(false); onDone(); }, 1500);
+    } catch (e) {
+      setError("Error: " + (e.message || "Unknown error"));
+    }
+    setSaving(false);
   };
 
   if (success) return (
@@ -916,9 +1034,10 @@ function AddSampleForm({ bb, samples, setSamples, onDone }) {
         <Chip items={["In Stock", "Limited", "Pre-order"]} selected={form.availability} onSelect={v => set("availability", v)} />
       </div>
 
+      {error && <div style={{ padding: "10px 14px", borderRadius: 8, background: "rgba(239,68,68,0.1)", color: T.danger, fontSize: 13, marginBottom: 14 }}>{error}</div>}
       <div style={{ display: "flex", gap: 10 }}>
-        <button onClick={submit} style={{ ...btnP, padding: "13px 28px", fontSize: 14 }}>{I.plus} List Sample</button>
-        <button onClick={onDone} style={{ ...btnS, padding: "13px 28px", fontSize: 14 }}>Cancel</button>
+        <button onClick={submit} disabled={saving} style={{ ...btnP, padding: "13px 28px", fontSize: 14, opacity: saving ? 0.6 : 1 }}>{saving ? "Saving..." : <>{I.plus} List Sample</>}</button>
+        <button onClick={onDone} disabled={saving} style={{ ...btnS, padding: "13px 28px", fontSize: 14 }}>Cancel</button>
       </div>
     </div>
   );
@@ -1003,7 +1122,7 @@ function ProfilePage({ onNav, user, logout }) {
                 </div>
                 <div style={{ marginBottom: 12 }}><label style={lb}>Bio</label><textarea value={form.bio} onChange={e => set("bio", e.target.value)} rows={3} style={{ ...inp, width: "100%", resize: "vertical" }} /></div>
                 <div style={{ display: "flex", gap: 8 }}>
-                  <button onClick={() => { authAPI.updateProfile(user?.id, { name: form.name, email: form.email, institution: form.institution, location: form.location, bio: form.bio }).catch(e => console.error('SAVE ERROR:', e)); setEditing(false); }} style={{ ...btnP, padding: "9px 20px", fontSize: 13 }}>Save</button>
+                  <button onClick={() => { db.updateProfile(user?.id, { name: form.name, email: form.email, institution: form.institution, location: form.location, bio: form.bio }).catch(e => console.error('SAVE ERROR:', e)); setEditing(false); }} style={{ ...btnP, padding: "9px 20px", fontSize: 13 }}>Save</button>
                   <button onClick={() => setEditing(false)} style={{ ...btnS, padding: "9px 20px", fontSize: 13 }}>Cancel</button>
                 </div>
               </div>
@@ -1151,7 +1270,7 @@ function RealMsgPanel({ threads, role, userName, userId }) {
   useEffect(() => {
     if (!activeThread) return;
     setLoading(true);
-    messagesAPI.listByThread(activeThread).then(data => {
+    db.loadMessages(activeThread).then(data => {
       if (data) setThreadMsgs(data.map(m => ({
         id: m.id, from: m.sender_id === userId ? role : (role === "researcher" ? "biobank" : "researcher"),
         fromName: m.sender_name, text: m.text, time: m.created_at ? new Date(m.created_at).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" }) : "Now",
@@ -1160,13 +1279,14 @@ function RealMsgPanel({ threads, role, userName, userId }) {
     }).catch(() => setLoading(false));
 
     // Subscribe to new messages in real-time
-    const channel = messagesAPI.subscribeToThread(activeThread, (payload) => {
+    const channel = supabase.channel(`messages:${activeThread}`)
+      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'messages', filter: `thread_id=eq.${activeThread}` }, (payload) => {
       const m = payload.new;
       setThreadMsgs(prev => [...prev, {
         id: m.id, from: m.sender_id === userId ? role : (role === "researcher" ? "biobank" : "researcher"),
         fromName: m.sender_name, text: m.text, time: "Just now",
       }]);
-    });
+    }).subscribe();
     return () => { if (channel) channel.unsubscribe(); };
   }, [activeThread, userId, role]);
 
@@ -1174,10 +1294,8 @@ function RealMsgPanel({ threads, role, userName, userId }) {
 
   const send = () => {
     if (!newMsg.trim() || !activeThread) return;
-    // Add locally immediately
     setThreadMsgs(prev => [...prev, { id: "m" + Date.now(), from: role, fromName: userName, text: newMsg.trim(), time: "Just now" }]);
-    // Save to DB
-    messagesAPI.send(userId, { threadId: activeThread, text: newMsg.trim(), senderName: userName }).catch(e => console.log("Msg send:", e));
+    db.sendMessage(userId, activeThread, newMsg.trim(), userName).catch(e => console.log("Msg send:", e));
     setNewMsg("");
   };
 
