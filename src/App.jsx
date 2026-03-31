@@ -85,8 +85,14 @@ const db = {
     return data || [];
   },
   async createThread(userId, biobankId, sampleId, message) {
+    if (!userId) return null;
     const { data, error } = await supabase.from('threads').insert({ researcher_id: userId, biobank_id: biobankId, sample_id: sampleId, last_message: message?.slice(0, 100), last_message_at: new Date().toISOString() }).select().maybeSingle();
     console.log("DB createThread:", data, error);
+    if (data && message) {
+      const profile = await db.getProfile(userId);
+      await supabase.from('messages').insert({ thread_id: data.id, sender_id: userId, sender_name: profile?.name || "Researcher", text: message }).select();
+      console.log("DB first message inserted for thread:", data.id);
+    }
     return data;
   },
   async loadMessages(threadId) {
@@ -192,13 +198,21 @@ export default function BioVault() {
     const { data: { subscription } } = supabase.auth.onAuthStateChange(async (event, session) => {
       if (session?.user) {
         const profile = await db.getProfile(session.user.id);
-        setUser(profile || { id: session.user.id, email: session.user.email, name: session.user.email, role: session.user.user_metadata?.role || "researcher" });
+        const u = profile || { id: session.user.id, email: session.user.email, name: session.user.user_metadata?.name || session.user.email, role: session.user.user_metadata?.role || "researcher" };
+        setUser(u);
       } else {
         setUser(null);
       }
     });
     return () => subscription.unsubscribe();
   }, []);
+
+  // Auto-navigate when user logs in while on auth screen
+  useEffect(() => {
+    if (user && view === "auth") {
+      nav(user.role === "researcher" ? "researcher" : "biobank");
+    }
+  }, [user, view]);
 
   // Load samples and biobanks from Supabase
   useEffect(() => {
@@ -377,7 +391,7 @@ function AuthScreen({ onLogin, onNav }) {
   const [form, setForm] = useState({ name: "", email: "", password: "", institution: "", biobankName: "", location: "" });
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
-  const set = (k, v) => setForm({ ...form, [k]: v });
+  const set = (k, v) => setForm(prev => ({ ...prev, [k]: v }));
 
   const submit = async () => {
     setError("");
@@ -937,8 +951,8 @@ function AddSampleForm({ bb, samples, setSamples, onDone }) {
   const [success, setSuccess] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
-  const set = (k, v) => setForm({ ...form, [k]: v });
-  const toggleD = (d) => set("matchedData", form.matchedData.includes(d) ? form.matchedData.filter(x => x !== d) : [...form.matchedData, d]);
+  const set = (k, v) => setForm(prev => ({ ...prev, [k]: v }));
+  const toggleD = (d) => setForm(prev => ({ ...prev, matchedData: prev.matchedData.includes(d) ? prev.matchedData.filter(x => x !== d) : [...prev.matchedData, d] }));
 
   const subtypes = {
     Tissue: ["FFPE", "Fresh Frozen", "OCT Embedded", "Cryopreserved"],
@@ -991,7 +1005,7 @@ function AddSampleForm({ bb, samples, setSamples, onDone }) {
       <p style={{ color: T.textMuted, fontSize: 13, marginBottom: 22 }}>Make your specimen discoverable to researchers.</p>
 
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14, marginBottom: 14 }}>
-        <div><label style={lb}>Sample Type *</label><Chip items={["Tissue", "Blood", "DNA", "RNA"]} selected={form.type} onSelect={v => { set("type", v); set("subtype", ""); }} /></div>
+        <div><label style={lb}>Sample Type *</label><Chip items={["Tissue", "Blood", "DNA", "RNA"]} selected={form.type} onSelect={v => setForm(prev => ({ ...prev, type: v, subtype: "" }))} /></div>
         <div><label style={lb}>Subtype *</label><Chip items={subtypes[form.type] || []} selected={form.subtype} onSelect={v => set("subtype", v)} /></div>
       </div>
 
@@ -1084,7 +1098,7 @@ function RequestsTab({ requests, onUpdate }) {
 function ProfilePage({ onNav, user, logout }) {
   const [editing, setEditing] = useState(false);
   const [form, setForm] = useState({ name: user?.name || "", email: user?.email || "", institution: user?.institution || "", location: user?.location || "", bio: "Biomedical researcher focused on translational oncology and precision medicine." });
-  const set = (k, v) => setForm({ ...form, [k]: v });
+  const set = (k, v) => setForm(prev => ({ ...prev, [k]: v }));
   const isR = user?.role === "researcher";
 
   return (
