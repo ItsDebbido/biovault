@@ -50,15 +50,6 @@ const db = {
     if (!biobankId) return [];
     const { data, error } = await supabase.from('requests').select('*, samples(disease, subtype)').eq('biobank_id', biobankId).order('created_at', { ascending: false });
     if (error) { console.error("LOAD BB REQUESTS:", error); return []; }
-    if (data) {
-      for (const r of data) {
-        if (r.researcher_id) {
-          const profile = await db.getProfile(r.researcher_id);
-          r._researcherName = profile?.name || "Researcher";
-          r._researcherInstitution = profile?.institution || "";
-        }
-      }
-    }
     return data || [];
   },
   async updateRequestStatus(id, status) {
@@ -91,29 +82,18 @@ const db = {
     if (role === 'biobank' && biobankId) {
       const { data, error } = await supabase.from('threads').select('*, samples(disease, subtype)').eq('biobank_id', biobankId).order('last_message_at', { ascending: false });
       console.log("DB loadThreads biobank RESULT:", data, "ERROR:", error);
-      // Load researcher names separately
-      if (data) {
-        for (const t of data) {
-          if (t.researcher_id) {
-            const profile = await db.getProfile(t.researcher_id);
-            t._researcherName = profile?.name || "Researcher";
-          }
-        }
-      }
       return data || [];
     }
     const { data, error } = await supabase.from('threads').select('*, biobanks(name), samples(disease, subtype)').eq('researcher_id', userId).order('last_message_at', { ascending: false });
     console.log("DB loadThreads researcher RESULT:", data, "ERROR:", error);
     return data || [];
   },
-  async createThread(userId, biobankId, sampleId, message) {
+  async createThread(userId, biobankId, sampleId, message, senderName) {
     if (!userId) return null;
     const { data, error } = await supabase.from('threads').insert({ researcher_id: userId, biobank_id: biobankId, sample_id: sampleId, last_message: message?.slice(0, 100), last_message_at: new Date().toISOString() }).select().maybeSingle();
     console.log("DB createThread:", data, error);
     if (data && message) {
-      const profile = await db.getProfile(userId);
-      await supabase.from('messages').insert({ thread_id: data.id, sender_id: userId, sender_name: profile?.name || "Researcher", text: message }).select();
-      console.log("DB first message inserted for thread:", data.id);
+      await supabase.from('messages').insert({ thread_id: data.id, sender_id: userId, sender_name: senderName || "Researcher", text: message }).select();
     }
     return data;
   },
@@ -339,7 +319,7 @@ export default function BioVault() {
         {view === "landing" && <Landing onNav={nav} user={user} logout={logout} sampleCount={samples.length} biobankCount={allBiobanks.length} />}
         {view === "auth" && <AuthScreen onLogin={login} onNav={nav} />}
         {view === "researcher" && <ResearcherView onNav={nav} user={user} logout={logout} samples={samples} messages={messages} setMessages={setMessages} threads={threads} favorites={favorites} toggleFav={toggleFav} openBB={openBB} getBB={getBB} />}
-        {view === "biobank" && <BiobankDash onNav={nav} user={user} logout={logout} samples={samples} setSamples={setSamples} requests={requests} setRequests={setRequests} messages={messages} setMessages={setMessages} threads={threads} getBB={getBB} />}
+        {view === "biobank" && <BiobankDash onNav={nav} user={user} logout={logout} samples={samples} setSamples={setSamples} requests={requests} setRequests={setRequests} messages={messages} setMessages={setMessages} threads={threads} getBB={getBB} allBiobanks={allBiobanks} />}
         {view === "profile" && <ProfilePage onNav={nav} user={user} logout={logout} />}
         {view === "biobankProfile" && viewBiobank && <BBProfile onNav={nav} user={user} logout={logout} bb={viewBiobank} samples={samples} favorites={favorites} toggleFav={toggleFav} />}
       </div>
@@ -427,12 +407,12 @@ function AuthScreen({ onLogin, onNav }) {
           options: { data: { name: form.name, role, institution: form.institution, biobankName: form.biobankName, location: form.location } }
         });
         if (err) throw err;
-        // onAuthStateChange listener will set user and auto-navigate
       } else {
         const { error: err } = await supabase.auth.signInWithPassword({ email: form.email, password: form.password });
         if (err) throw err;
-        // onAuthStateChange listener will set user and auto-navigate
       }
+      // Auth listener will handle navigation, but clear loading after short delay as safety
+      setTimeout(() => setLoading(false), 2000);
     } catch (e) {
       setError(e.message || "Authentication failed.");
       setLoading(false);
@@ -551,14 +531,13 @@ function ResearcherView({ onNav, user, logout, samples, messages, setMessages, t
   const sendReq = async () => {
     if (!user?.id) return;
     setSendingReq(true);
-    let anyFailed = false;
     for (const s of cart) {
       const { error } = await db.createRequest(user.id, s.id, s.biobankId || s.biobank_id, 1, reqMsg);
-      if (error) { anyFailed = true; console.error("Request failed:", error); }
-      else { db.createThread(user.id, s.biobankId || s.biobank_id, s.id, reqMsg).catch(() => {}); }
+      if (error) console.error("Request failed:", error);
+      // Create thread in background - don't await
+      db.createThread(user.id, s.biobankId || s.biobank_id, s.id, reqMsg, user?.name || user?.email).catch(() => {});
     }
     setSendingReq(false);
-    if (anyFailed) { alert("Some requests failed to save. Check console for details."); }
     setRequestSent(true);
     setTimeout(() => { setRequestSent(false); setShowRequest(false); setCart([]); setReqMsg(""); }, 2000);
   };
@@ -798,7 +777,7 @@ function SampleDetail({ sample, biobank, onAdd, inCart, isFav, toggleFav, onView
 
 // ── Messaging ──────────────────────────────────────────────
 // ── Biobank Dashboard ──────────────────────────────────────
-function BiobankDash({ onNav, user, logout, samples, setSamples, requests, setRequests, messages, setMessages, threads, getBB }) {
+function BiobankDash({ onNav, user, logout, samples, setSamples, requests, setRequests, messages, setMessages, threads, getBB, allBiobanks }) {
   const [tab, setTab] = useState("overview");
   const [myBB, setMyBB] = useState({ id: null, name: "My Biobank", location: "", specialties: [], certifications: [], verified: false, rating: 0, samples: 0, bio: "", reviews: 0, founded: "", responseTime: "< 48h" });
   const [realRequests, setRealRequests] = useState([]);
@@ -819,7 +798,7 @@ function BiobankDash({ onNav, user, logout, samples, setSamples, requests, setRe
     db.loadBiobankRequests(myBB.id).then(data => {
       if (data) {
         const mapped = data.map(r => ({
-          id: r.id, researcher: r._researcherName || "Researcher", institution: r._researcherInstitution || "",
+          id: r.id, researcher: "Researcher", institution: "",
           sampleId: r.sample_id, quantity: r.quantity, status: r.status, date: r.created_at?.slice(0, 10),
           message: r.message, _sample: r.samples,
         }));
@@ -843,7 +822,7 @@ function BiobankDash({ onNav, user, logout, samples, setSamples, requests, setRe
       if (data) setRealThreads(data.map(t => ({
         id: t.id, biobankId: t.biobank_id, sampleId: t.sample_id,
         lastMessage: t.last_message, lastDate: t.last_message_at?.slice(0, 10),
-        researcherName: t._researcherName || "Researcher",
+        researcherName: "Researcher",
         sampleInfo: t.samples ? `${t.samples.disease} — ${t.samples.subtype}` : "",
       })));
     }).catch(() => {});
@@ -858,11 +837,14 @@ function BiobankDash({ onNav, user, logout, samples, setSamples, requests, setRe
     db.updateRequestStatus(id, st).catch(e => console.log("Status update:", e));
   };
 
+  const ADMIN_ID = "ae0b1419-ea53-4020-89bf-e5e2af928b26";
+  const isAdmin = user?.id === ADMIN_ID;
+
   const tabs = [
     { id: "overview", l: "Overview", icon: I.chart },
     { id: "inventory", l: "Inventory", icon: I.flask },
     { id: "add", l: "Add Sample", icon: I.plus },
-    { id: "bulk", l: "Bulk Import", icon: I.inbox },
+    ...(isAdmin ? [{ id: "bulk", l: "Bulk Import", icon: I.inbox }] : []),
     { id: "requests", l: "Requests", icon: I.inbox, badge: allRequests.filter(r => r.status === "pending").length },
     { id: "messages", l: "Messages", icon: I.msg, badge: realThreads.length },
   ];
@@ -884,7 +866,7 @@ function BiobankDash({ onNav, user, logout, samples, setSamples, requests, setRe
           {tab === "overview" && <OverviewTab bb={myBB} samples={mySamples} requests={allRequests} />}
           {tab === "inventory" && <InventoryTab samples={mySamples} onAdd={() => setTab("add")} />}
           {tab === "add" && <AddSampleForm bb={myBB} samples={samples} setSamples={setSamples} onDone={() => setTab("inventory")} />}
-          {tab === "bulk" && <BulkImport bb={myBB} samples={samples} setSamples={setSamples} />}
+          {tab === "bulk" && <BulkImport bb={myBB} allBiobanks={allBiobanks} samples={samples} setSamples={setSamples} />}
           {tab === "requests" && <RequestsTab requests={allRequests} onUpdate={updateReq} />}
           {tab === "messages" && <RealMsgPanel threads={realThreads} role="biobank" userName={myBB.name} userId={user?.id} />}
         </main>
@@ -1366,11 +1348,15 @@ function RealMsgPanel({ threads, role, userName, userId }) {
 }
 
 // ── Bulk Import (Admin Scraping) ────────────────────
-function BulkImport({ bb, samples, setSamples }) {
+function BulkImport({ bb, allBiobanks, samples, setSamples }) {
+  const [selectedBB, setSelectedBB] = useState(bb?.id || "");
   const [jsonInput, setJsonInput] = useState("");
   const [importing, setImporting] = useState(false);
   const [result, setResult] = useState(null);
   const [quickForm, setQuickForm] = useState({ type: "Tissue", subtype: "", disease: "", organ: "", preservation: "", quantity: "", unit: "samples", price: "", consent: "Broad Research", availability: "In Stock" });
+
+  const activeBB = selectedBB || bb?.id;
+  const activeBBName = allBiobanks.find(b => b.id === activeBB)?.name || bb?.name || "Select a biobank";
 
   const exampleJson = `[
   {
@@ -1388,48 +1374,41 @@ function BulkImport({ bb, samples, setSamples }) {
   }
 ]`;
 
+  const reloadSamples = () => {
+    db.loadSamples().then(data => {
+      if (data.length > 0) {
+        setSamples(data.map(s => ({
+          id: s.id, biobankId: s.biobank_id, type: s.type, subtype: s.subtype,
+          disease: s.disease, organ: s.organ, preservation: s.preservation,
+          quantity: s.quantity, unit: s.unit, price: Number(s.price),
+          consent: s.consent, matchedData: s.matched_data || [], availability: s.availability,
+          _biobank: s.biobanks || null,
+        })));
+      }
+    });
+  };
+
   const importJson = async () => {
-    if (!bb?.id) { setResult({ ok: false, msg: "No biobank profile found." }); return; }
+    if (!activeBB) { setResult({ ok: false, msg: "Select a biobank first." }); return; }
     setImporting(true);
     setResult(null);
     try {
       const parsed = JSON.parse(jsonInput);
       const items = Array.isArray(parsed) ? parsed : [parsed];
-      let success = 0;
-      let failed = 0;
+      let success = 0, failed = 0;
       for (const item of items) {
         const { error } = await db.createSample({
-          biobank_id: bb.id,
-          type: item.type || "Tissue",
-          subtype: item.subtype || "",
-          disease: item.disease || "",
-          organ: item.organ || "",
-          preservation: item.preservation || "",
-          quantity: parseInt(item.quantity) || 0,
-          unit: item.unit || "samples",
-          price: parseFloat(item.price) || 0,
-          consent: item.consent || "Broad Research",
-          matched_data: item.matched_data || [],
-          availability: item.availability || "In Stock",
+          biobank_id: activeBB,
+          type: item.type || "Tissue", subtype: item.subtype || "", disease: item.disease || "",
+          organ: item.organ || "", preservation: item.preservation || "",
+          quantity: parseInt(item.quantity) || 0, unit: item.unit || "samples",
+          price: parseFloat(item.price) || 0, consent: item.consent || "Broad Research",
+          matched_data: item.matched_data || [], availability: item.availability || "In Stock",
         });
-        if (error) { failed++; console.error("Import error:", error); }
-        else { success++; }
+        if (error) { failed++; console.error("Import error:", error); } else { success++; }
       }
-      setResult({ ok: failed === 0, msg: `Imported ${success} samples${failed > 0 ? `, ${failed} failed` : ""}` });
-      if (success > 0) {
-        // Reload samples
-        db.loadSamples().then(data => {
-          if (data.length > 0) {
-            setSamples(data.map(s => ({
-              id: s.id, biobankId: s.biobank_id, type: s.type, subtype: s.subtype,
-              disease: s.disease, organ: s.organ, preservation: s.preservation,
-              quantity: s.quantity, unit: s.unit, price: Number(s.price),
-              consent: s.consent, matchedData: s.matched_data || [], availability: s.availability,
-              _biobank: s.biobanks || null,
-            })));
-          }
-        });
-      }
+      setResult({ ok: failed === 0, msg: `Imported ${success} samples to ${activeBBName}${failed > 0 ? `, ${failed} failed` : ""}` });
+      if (success > 0) reloadSamples();
     } catch (e) {
       setResult({ ok: false, msg: "Invalid JSON: " + e.message });
     }
@@ -1437,10 +1416,10 @@ function BulkImport({ bb, samples, setSamples }) {
   };
 
   const quickAdd = async () => {
-    if (!bb?.id || !quickForm.disease) return;
+    if (!activeBB || !quickForm.disease) { setResult({ ok: false, msg: "Select a biobank and enter disease." }); return; }
     setImporting(true);
     const { error } = await db.createSample({
-      biobank_id: bb.id, type: quickForm.type, subtype: quickForm.subtype,
+      biobank_id: activeBB, type: quickForm.type, subtype: quickForm.subtype,
       disease: quickForm.disease, organ: quickForm.organ, preservation: quickForm.preservation,
       quantity: parseInt(quickForm.quantity) || 0, unit: quickForm.unit,
       price: parseFloat(quickForm.price) || 0, consent: quickForm.consent,
@@ -1448,8 +1427,9 @@ function BulkImport({ bb, samples, setSamples }) {
     });
     if (error) { setResult({ ok: false, msg: "Failed: " + error.message }); }
     else {
-      setResult({ ok: true, msg: "Sample added!" });
-      setQuickForm({ ...quickForm, disease: "", organ: "", subtype: "", quantity: "", price: "" });
+      setResult({ ok: true, msg: `Sample added to ${activeBBName}!` });
+      setQuickForm(prev => ({ ...prev, disease: "", organ: "", subtype: "", quantity: "", price: "" }));
+      reloadSamples();
     }
     setImporting(false);
   };
@@ -1458,21 +1438,27 @@ function BulkImport({ bb, samples, setSamples }) {
 
   return (
     <div>
-      <h2 style={{ fontFamily: "'Space Grotesk',sans-serif", fontSize: 18, fontWeight: 600, marginBottom: 4 }}>Bulk Import</h2>
-      <p style={{ color: T.textMuted, fontSize: 13, marginBottom: 22 }}>Quickly add scraped biobank inventory data.</p>
+      <h2 style={{ fontFamily: "'Space Grotesk',sans-serif", fontSize: 18, fontWeight: 600, marginBottom: 4 }}>Bulk Import (Admin)</h2>
+      <p style={{ color: T.textMuted, fontSize: 13, marginBottom: 22 }}>Import scraped biobank inventory. Select which biobank the samples belong to.</p>
+
+      {/* Biobank Selector */}
+      <div style={{ ...crd, padding: 16, marginBottom: 16 }}>
+        <label style={lb}>Import samples for biobank:</label>
+        <select value={selectedBB} onChange={e => setSelectedBB(e.target.value)} style={{ ...inp, width: "100%" }}>
+          <option value="">-- Select Biobank --</option>
+          {allBiobanks.map(b => <option key={b.id} value={b.id}>{b.name} ({b.location})</option>)}
+          {bb?.id && !allBiobanks.find(b => b.id === bb.id) && <option value={bb.id}>{bb.name}</option>}
+        </select>
+        {activeBB && <p style={{ fontSize: 12, color: T.accent, marginTop: 8 }}>Importing to: {activeBBName}</p>}
+      </div>
 
       {result && <div style={{ padding: "10px 14px", borderRadius: 8, background: result.ok ? T.accentDim : "rgba(239,68,68,0.1)", color: result.ok ? T.accent : T.danger, fontSize: 13, marginBottom: 14 }}>{result.msg}</div>}
 
-      {/* Quick Add Row */}
+      {/* Quick Add */}
       <div style={{ ...crd, padding: 18, marginBottom: 20 }}>
         <h3 style={{ fontFamily: "'Space Grotesk',sans-serif", fontSize: 15, fontWeight: 600, marginBottom: 14 }}>Quick Add</h3>
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr", gap: 10, marginBottom: 12 }}>
-          <div>
-            <label style={lb}>Type</label>
-            <select value={quickForm.type} onChange={e => qset("type", e.target.value)} style={{ ...inp, width: "100%" }}>
-              {["Tissue", "Blood", "DNA", "RNA"].map(t => <option key={t}>{t}</option>)}
-            </select>
-          </div>
+          <div><label style={lb}>Type</label><select value={quickForm.type} onChange={e => qset("type", e.target.value)} style={{ ...inp, width: "100%" }}>{["Tissue", "Blood", "DNA", "RNA"].map(t => <option key={t}>{t}</option>)}</select></div>
           <div><label style={lb}>Subtype</label><input value={quickForm.subtype} onChange={e => qset("subtype", e.target.value)} placeholder="FFPE, Serum..." style={{ ...inp, width: "100%" }} /></div>
           <div><label style={lb}>Disease *</label><input value={quickForm.disease} onChange={e => qset("disease", e.target.value)} placeholder="Breast Cancer" style={{ ...inp, width: "100%" }} /></div>
           <div><label style={lb}>Organ</label><input value={quickForm.organ} onChange={e => qset("organ", e.target.value)} placeholder="Breast" style={{ ...inp, width: "100%" }} /></div>
@@ -1481,23 +1467,18 @@ function BulkImport({ bb, samples, setSamples }) {
           <div><label style={lb}>Qty</label><input type="number" value={quickForm.quantity} onChange={e => qset("quantity", e.target.value)} placeholder="100" style={{ ...inp, width: "100%" }} /></div>
           <div><label style={lb}>Price $</label><input type="number" value={quickForm.price} onChange={e => qset("price", e.target.value)} placeholder="85" style={{ ...inp, width: "100%" }} /></div>
           <div><label style={lb}>Preservation</label><input value={quickForm.preservation} onChange={e => qset("preservation", e.target.value)} placeholder="Frozen -80C" style={{ ...inp, width: "100%" }} /></div>
-          <div>
-            <label style={lb}>Availability</label>
-            <select value={quickForm.availability} onChange={e => qset("availability", e.target.value)} style={{ ...inp, width: "100%" }}>
-              {["In Stock", "Limited", "Pre-order"].map(a => <option key={a}>{a}</option>)}
-            </select>
-          </div>
+          <div><label style={lb}>Availability</label><select value={quickForm.availability} onChange={e => qset("availability", e.target.value)} style={{ ...inp, width: "100%" }}>{["In Stock", "Limited", "Pre-order"].map(a => <option key={a}>{a}</option>)}</select></div>
           <button onClick={quickAdd} disabled={importing} style={{ ...btnP, padding: "12px 20px", fontSize: 13, opacity: importing ? 0.6 : 1 }}>{importing ? "..." : "Add"}</button>
         </div>
       </div>
 
-      {/* JSON Bulk Import */}
+      {/* JSON Import */}
       <div style={{ ...crd, padding: 18 }}>
         <h3 style={{ fontFamily: "'Space Grotesk',sans-serif", fontSize: 15, fontWeight: 600, marginBottom: 14 }}>JSON Import</h3>
-        <p style={{ color: T.textMuted, fontSize: 12, marginBottom: 10 }}>Paste an array of samples as JSON. Each object needs: type, subtype, disease, organ, quantity, price.</p>
+        <p style={{ color: T.textMuted, fontSize: 12, marginBottom: 10 }}>Paste an array of samples as JSON. The biobank_id will be set automatically from the selector above.</p>
         <textarea value={jsonInput} onChange={e => setJsonInput(e.target.value)} placeholder={exampleJson} rows={12} style={{ ...inp, width: "100%", resize: "vertical", fontFamily: "'JetBrains Mono', monospace", fontSize: 12, lineHeight: 1.6 }} />
         <div style={{ display: "flex", gap: 10, marginTop: 12 }}>
-          <button onClick={importJson} disabled={importing || !jsonInput.trim()} style={{ ...btnP, padding: "12px 24px", fontSize: 14, opacity: importing ? 0.6 : 1 }}>{importing ? "Importing..." : "Import JSON"}</button>
+          <button onClick={importJson} disabled={importing || !jsonInput.trim() || !activeBB} style={{ ...btnP, padding: "12px 24px", fontSize: 14, opacity: (importing || !activeBB) ? 0.6 : 1 }}>{importing ? "Importing..." : "Import JSON"}</button>
           <button onClick={() => setJsonInput(exampleJson)} style={{ ...btnS, padding: "12px 24px", fontSize: 14 }}>Load Example</button>
         </div>
       </div>
