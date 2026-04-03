@@ -550,14 +550,14 @@ function ResearcherView({ onNav, user, logout, samples, messages, setMessages, t
         <>
           <button onClick={() => setShowTracker(true)} style={btnG}>{I.list}</button>
           <button onClick={() => setShowFavorites(true)} style={{ ...btnG, position: "relative" }}>{I.heart(favorites.length > 0)}{favorites.length > 0 && <span style={{ position: "absolute", top: -4, right: -4, width: 16, height: 16, borderRadius: "50%", background: T.danger, color: "#fff", fontSize: 10, display: "flex", alignItems: "center", justifyContent: "center", fontWeight: 700 }}>{favorites.length}</span>}</button>
-          <button onClick={() => setShowMessages(true)} style={{ ...btnG, position: "relative" }}>{I.msg}<span style={{ position: "absolute", top: -1, right: 0, width: 7, height: 7, borderRadius: "50%", background: T.accent }} /></button>
           <button onClick={() => setShowRequest(true)} style={{ ...btnG, position: "relative" }}>{I.cart}{cart.length > 0 && <span style={{ position: "absolute", top: -4, right: -4, width: 18, height: 18, borderRadius: "50%", background: T.accent, color: T.bg, fontSize: 11, display: "flex", alignItems: "center", justifyContent: "center", fontWeight: 700 }}>{cart.length}</span>}</button>
           <button onClick={() => onNav("biobank")} style={btnG}>Dashboard</button>
         </>
       } />
       <div style={{ padding: "24px 20px", maxWidth: 1200, margin: "0 auto" }}>
         <div style={{ marginBottom: 24 }}>
-          <h2 style={{ fontFamily: "'Space Grotesk',sans-serif", fontSize: 20, fontWeight: 600, marginBottom: 16 }}>Discover Biospecimens</h2>
+          <h2 style={{ fontFamily: "'Space Grotesk',sans-serif", fontSize: 20, fontWeight: 600, marginBottom: 4 }}>Welcome, {user?.name || "Researcher"}</h2>
+          <p style={{ color: T.textMuted, fontSize: 13, marginBottom: 16 }}>Discover biospecimens from verified biobanks worldwide.</p>
           <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginBottom: 10 }}>
             <div style={{ flex: 1, minWidth: 220, position: "relative" }}>
               <span style={{ position: "absolute", left: 14, top: "50%", transform: "translateY(-50%)", color: T.textMuted }}>{I.search}</span>
@@ -665,7 +665,6 @@ function ResearcherView({ onNav, user, logout, samples, messages, setMessages, t
         </Modal>
       )}
 
-      {showMessages && <Modal onClose={() => setShowMessages(false)}><RealMsgPanel threads={realThreads} role="researcher" userName={user?.name || "Researcher"} userId={user?.id} /></Modal>}
 
       {showFavorites && (
         <Modal onClose={() => setShowFavorites(false)}>
@@ -846,6 +845,8 @@ function BiobankDash({ onNav, user, logout, samples, setSamples, requests, setRe
     { id: "add", l: "Add Sample", icon: I.plus },
     ...(isAdmin ? [{ id: "bulk", l: "Bulk Import", icon: I.inbox }] : []),
     { id: "requests", l: "Requests", icon: I.inbox, badge: allRequests.filter(r => r.status === "pending").length },
+    { id: "shipping", l: "Shipping", icon: I.cart },
+    { id: "payments", l: "Leads", icon: I.chart },
     { id: "messages", l: "Messages", icon: I.msg, badge: realThreads.length },
   ];
 
@@ -868,6 +869,8 @@ function BiobankDash({ onNav, user, logout, samples, setSamples, requests, setRe
           {tab === "add" && <AddSampleForm bb={myBB} samples={samples} setSamples={setSamples} onDone={() => setTab("inventory")} />}
           {tab === "bulk" && <BulkImport bb={myBB} allBiobanks={allBiobanks} samples={samples} setSamples={setSamples} />}
           {tab === "requests" && <RequestsTab requests={allRequests} onUpdate={updateReq} />}
+          {tab === "shipping" && <ShippingTab requests={allRequests} onUpdate={updateReq} />}
+          {tab === "payments" && <PaymentsTab requests={allRequests} bb={myBB} />}
           {tab === "messages" && <RealMsgPanel threads={realThreads} role="biobank" userName={myBB.name} userId={user?.id} />}
         </main>
       </div>
@@ -1091,9 +1094,29 @@ function RequestsTab({ requests, onUpdate }) {
 // ── Profile Page ───────────────────────────────────────────
 function ProfilePage({ onNav, user, logout }) {
   const [editing, setEditing] = useState(false);
-  const [form, setForm] = useState({ name: user?.name || "", email: user?.email || "", institution: user?.institution || "", location: user?.location || "", bio: "Biomedical researcher focused on translational oncology and precision medicine." });
+  const [form, setForm] = useState({ name: user?.name || "", email: user?.email || "", institution: user?.institution || "", location: user?.location || "", bio: user?.bio || "Biomedical researcher focused on translational oncology and precision medicine.", biobankName: "" });
   const set = (k, v) => setForm(prev => ({ ...prev, [k]: v }));
   const isR = user?.role === "researcher";
+
+  // Load biobank name for biobank users
+  useEffect(() => {
+    if (!isR && user?.id) {
+      db.getMyBiobank(user.id).then(bb => {
+        if (bb) set("biobankName", bb.name);
+      }).catch(() => {});
+    }
+  }, [user?.id]);
+
+  const saveProfile = () => {
+    db.updateProfile(user?.id, { name: form.name, email: form.email, institution: form.institution, location: form.location, bio: form.bio }).catch(e => console.error('SAVE ERROR:', e));
+    // Also update biobank name if biobank user
+    if (!isR && form.biobankName && user?.id) {
+      db.getMyBiobank(user.id).then(bb => {
+        if (bb) supabase.from('biobanks').update({ name: form.biobankName }).eq('id', bb.id).then(() => console.log("Biobank name updated"));
+      }).catch(() => {});
+    }
+    setEditing(false);
+  };
 
   return (
     <div style={{ minHeight: "100vh", display: "flex", flexDirection: "column" }}>
@@ -1125,12 +1148,12 @@ function ProfilePage({ onNav, user, logout }) {
                   <div><label style={lb}>Email</label><input value={form.email} onChange={e => set("email", e.target.value)} style={{ ...inp, width: "100%" }} /></div>
                 </div>
                 <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginBottom: 12 }}>
-                  <div><label style={lb}>{isR ? "Institution" : "Biobank"}</label><input value={form.institution} onChange={e => set("institution", e.target.value)} style={{ ...inp, width: "100%" }} /></div>
+                  <div><label style={lb}>{isR ? "Institution" : "Biobank Name"}</label><input value={isR ? form.institution : form.biobankName} onChange={e => isR ? set("institution", e.target.value) : set("biobankName", e.target.value)} style={{ ...inp, width: "100%" }} /></div>
                   <div><label style={lb}>Location</label><input value={form.location} onChange={e => set("location", e.target.value)} style={{ ...inp, width: "100%" }} /></div>
                 </div>
                 <div style={{ marginBottom: 12 }}><label style={lb}>Bio</label><textarea value={form.bio} onChange={e => set("bio", e.target.value)} rows={3} style={{ ...inp, width: "100%", resize: "vertical" }} /></div>
                 <div style={{ display: "flex", gap: 8 }}>
-                  <button onClick={() => { db.updateProfile(user?.id, { name: form.name, email: form.email, institution: form.institution, location: form.location, bio: form.bio }).catch(e => console.error('SAVE ERROR:', e)); setEditing(false); }} style={{ ...btnP, padding: "9px 20px", fontSize: 13 }}>Save</button>
+                  <button onClick={saveProfile} style={{ ...btnP, padding: "9px 20px", fontSize: 13 }}>Save</button>
                   <button onClick={() => setEditing(false)} style={{ ...btnS, padding: "9px 20px", fontSize: 13 }}>Cancel</button>
                 </div>
               </div>
@@ -1267,6 +1290,125 @@ function BBProfile({ onNav, user, logout, bb, samples, favorites, toggleFav }) {
 }
 
 // ── Real-time Messaging Panel ──────────────────────
+// ── Shipping Tab ───────────────────────────────────
+function ShippingTab({ requests, onUpdate }) {
+  const shipped = requests.filter(r => r.status === "approved" || r.status === "shipped" || r.status === "delivered");
+  const steps = ["approved", "shipped", "delivered"];
+  const stepLabels = { approved: "Preparing", shipped: "In Transit", delivered: "Delivered" };
+
+  return (
+    <div>
+      <h2 style={{ fontFamily: "'Space Grotesk',sans-serif", fontSize: 18, fontWeight: 600, marginBottom: 6 }}>Shipping & Delivery</h2>
+      <p style={{ color: T.textMuted, fontSize: 13, marginBottom: 20 }}>Track and update shipment status for approved requests.</p>
+
+      {shipped.length === 0 ? <p style={{ color: T.textMuted, textAlign: "center", padding: 40 }}>No approved requests to ship yet.</p> : (
+        <div style={{ display: "grid", gap: 10 }}>
+          {shipped.map((r, i) => {
+            const si = steps.indexOf(r.status);
+            return (
+              <div key={r.id} style={{ ...crd, animation: `slideUp 0.3s ease ${i * 0.05}s both` }}>
+                <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 10 }}>
+                  <div>
+                    <div style={{ fontSize: 14, fontWeight: 600 }}>{r._sample?.disease || "Sample"} — {r._sample?.subtype || ""}</div>
+                    <div style={{ fontSize: 12, color: T.textMuted }}>{r.researcher || "Researcher"} · Qty: {r.quantity} · {r.date}</div>
+                  </div>
+                  <span style={{ ...tg, background: `${statusColors[r.status]}22`, color: statusColors[r.status], fontWeight: 600 }}>{stepLabels[r.status] || r.status}</span>
+                </div>
+
+                <div style={{ display: "flex", alignItems: "center", gap: 0, margin: "12px 0 6px" }}>
+                  {steps.map((step, idx) => {
+                    const done = idx <= si;
+                    const cur = idx === si;
+                    return (
+                      <div key={step} style={{ display: "flex", alignItems: "center", flex: idx < steps.length - 1 ? 1 : "none" }}>
+                        <div style={{ width: 28, height: 28, borderRadius: "50%", background: done ? T.accent : T.border, display: "flex", alignItems: "center", justifyContent: "center", boxShadow: cur ? `0 0 8px ${T.accentGlow}` : "none" }}>
+                          {done && <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke={T.bg} strokeWidth="3"><polyline points="20 6 9 17 4 12"/></svg>}
+                        </div>
+                        {idx < steps.length - 1 && <div style={{ flex: 1, height: 2, background: idx < si ? T.accent : T.border }} />}
+                      </div>
+                    );
+                  })}
+                </div>
+                <div style={{ display: "flex", justifyContent: "space-between", fontSize: 11, color: T.textMuted, marginBottom: 12 }}>
+                  {steps.map(s => <span key={s}>{stepLabels[s]}</span>)}
+                </div>
+
+                {r.status === "approved" && (
+                  <button onClick={() => onUpdate(r.id, "shipped")} style={{ ...btnP, padding: "8px 18px", fontSize: 12 }}>Mark as Shipped</button>
+                )}
+                {r.status === "shipped" && (
+                  <button onClick={() => onUpdate(r.id, "delivered")} style={{ ...btnP, padding: "8px 18px", fontSize: 12 }}>Mark as Delivered</button>
+                )}
+                {r.status === "delivered" && (
+                  <span style={{ fontSize: 12, color: T.accent }}>Completed</span>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── Payments / Leads Tab ──────────────────────────
+function PaymentsTab({ requests, bb }) {
+  const approved = requests.filter(r => r.status !== "pending" && r.status !== "rejected");
+  const totalLeads = requests.length;
+  const convertedLeads = approved.length;
+  const conversionRate = totalLeads > 0 ? Math.round((convertedLeads / totalLeads) * 100) : 0;
+
+  return (
+    <div>
+      <h2 style={{ fontFamily: "'Space Grotesk',sans-serif", fontSize: 18, fontWeight: 600, marginBottom: 6 }}>Leads & Revenue</h2>
+      <p style={{ color: T.textMuted, fontSize: 13, marginBottom: 20 }}>Track researcher inquiries and conversion metrics.</p>
+
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))", gap: 10, marginBottom: 24 }}>
+        {[
+          { l: "Total Leads", v: totalLeads, c: T.info },
+          { l: "Converted", v: convertedLeads, c: T.accent },
+          { l: "Conversion Rate", v: conversionRate + "%", c: T.warning },
+          { l: "Pending Review", v: requests.filter(r => r.status === "pending").length, c: "#8b5cf6" },
+        ].map((s, i) => (
+          <div key={i} style={{ ...crd, padding: 18, textAlign: "center", animation: `slideUp 0.3s ease ${i * 0.08}s both` }}>
+            <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontSize: 26, fontWeight: 700, color: s.c }}>{s.v}</div>
+            <div style={{ fontSize: 11, color: T.textMuted, marginTop: 4 }}>{s.l}</div>
+          </div>
+        ))}
+      </div>
+
+      <div style={{ ...crd, padding: 20, marginBottom: 16 }}>
+        <h3 style={{ fontFamily: "'Space Grotesk',sans-serif", fontSize: 15, fontWeight: 600, marginBottom: 14 }}>Lead History</h3>
+        {requests.length === 0 ? <p style={{ color: T.textMuted }}>No leads yet.</p> : (
+          <div style={{ borderRadius: 10, border: `1px solid ${T.border}`, overflow: "hidden" }}>
+            <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+              <thead><tr style={{ background: T.surfaceLight }}>
+                {["Date", "Researcher", "Sample", "Qty", "Status"].map(h => <th key={h} style={{ padding: "10px 12px", textAlign: "left", fontWeight: 500, color: T.textMuted, fontSize: 10, textTransform: "uppercase", letterSpacing: 1 }}>{h}</th>)}
+              </tr></thead>
+              <tbody>
+                {requests.map(r => (
+                  <tr key={r.id} style={{ borderTop: `1px solid ${T.border}` }}>
+                    <td style={cl}>{r.date}</td>
+                    <td style={cl}>{r.researcher || "Researcher"}</td>
+                    <td style={cl}>{r._sample?.disease || "Sample"}</td>
+                    <td style={cl}>{r.quantity}</td>
+                    <td style={cl}><span style={{ color: statusColors[r.status] || T.textMuted, fontWeight: 500, textTransform: "capitalize" }}>{r.status}</span></td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+
+      <div style={{ ...crd, padding: 20 }}>
+        <h3 style={{ fontFamily: "'Space Grotesk',sans-serif", fontSize: 15, fontWeight: 600, marginBottom: 10 }}>Pricing</h3>
+        <p style={{ color: T.textMuted, fontSize: 13, lineHeight: 1.7 }}>BioVault charges a lead fee for each qualified researcher inquiry. Current rate: <span style={{ color: T.accent, fontWeight: 600 }}>$50 per qualified lead</span>. Leads are only counted when a researcher submits a formal request for your samples.</p>
+      </div>
+    </div>
+  );
+}
+
 function RealMsgPanel({ threads, role, userName, userId }) {
   const [activeThread, setActiveThread] = useState(null);
   const [threadMsgs, setThreadMsgs] = useState([]);
@@ -1350,13 +1492,41 @@ function RealMsgPanel({ threads, role, userName, userId }) {
 // ── Bulk Import (Admin Scraping) ────────────────────
 function BulkImport({ bb, allBiobanks, samples, setSamples }) {
   const [selectedBB, setSelectedBB] = useState(bb?.id || "");
+  const [showNewBank, setShowNewBank] = useState(false);
+  const [newBank, setNewBank] = useState({ name: "", location: "", bio: "", specialties: "" });
+  const [creatingBank, setCreatingBank] = useState(false);
   const [jsonInput, setJsonInput] = useState("");
   const [importing, setImporting] = useState(false);
   const [result, setResult] = useState(null);
   const [quickForm, setQuickForm] = useState({ type: "Tissue", subtype: "", disease: "", organ: "", preservation: "", quantity: "", unit: "samples", price: "", consent: "Broad Research", availability: "In Stock" });
+  const [localBiobanks, setLocalBiobanks] = useState(allBiobanks);
 
-  const activeBB = selectedBB || bb?.id;
-  const activeBBName = allBiobanks.find(b => b.id === activeBB)?.name || bb?.name || "Select a biobank";
+  const activeBB = selectedBB === "__new__" ? null : (selectedBB || bb?.id);
+  const activeBBName = localBiobanks.find(b => b.id === activeBB)?.name || bb?.name || "Select a biobank";
+
+  const createNewBank = async () => {
+    if (!newBank.name) { setResult({ ok: false, msg: "Bank name is required." }); return; }
+    setCreatingBank(true);
+    const ADMIN_ID = "ae0b1419-ea53-4020-89bf-e5e2af928b26";
+    const { data, error } = await supabase.from('biobanks').insert({
+      owner_id: ADMIN_ID,
+      name: newBank.name,
+      location: newBank.location,
+      bio: newBank.bio,
+      specialties: newBank.specialties ? newBank.specialties.split(",").map(s => s.trim()) : [],
+      certifications: [],
+      verified: false,
+    }).select().maybeSingle();
+    if (error) { setResult({ ok: false, msg: "Failed to create bank: " + error.message }); }
+    else if (data) {
+      setResult({ ok: true, msg: `Created "${newBank.name}" — now select it to import samples.` });
+      setLocalBiobanks(prev => [...prev, { id: data.id, name: data.name, location: data.location }]);
+      setSelectedBB(data.id);
+      setShowNewBank(false);
+      setNewBank({ name: "", location: "", bio: "", specialties: "" });
+    }
+    setCreatingBank(false);
+  };
 
   const exampleJson = `[
   {
@@ -1444,12 +1614,26 @@ function BulkImport({ bb, allBiobanks, samples, setSamples }) {
       {/* Biobank Selector */}
       <div style={{ ...crd, padding: 16, marginBottom: 16 }}>
         <label style={lb}>Import samples for biobank:</label>
-        <select value={selectedBB} onChange={e => setSelectedBB(e.target.value)} style={{ ...inp, width: "100%" }}>
+        <select value={selectedBB} onChange={e => { setSelectedBB(e.target.value); setShowNewBank(e.target.value === "__new__"); }} style={{ ...inp, width: "100%" }}>
           <option value="">-- Select Biobank --</option>
-          {allBiobanks.map(b => <option key={b.id} value={b.id}>{b.name} ({b.location})</option>)}
-          {bb?.id && !allBiobanks.find(b => b.id === bb.id) && <option value={bb.id}>{bb.name}</option>}
+          {localBiobanks.map(b => <option key={b.id} value={b.id}>{b.name} ({b.location || ""})</option>)}
+          {bb?.id && !localBiobanks.find(b => b.id === bb.id) && <option value={bb.id}>{bb.name}</option>}
+          <option value="__new__">+ Add New Biobank</option>
         </select>
         {activeBB && <p style={{ fontSize: 12, color: T.accent, marginTop: 8 }}>Importing to: {activeBBName}</p>}
+
+        {showNewBank && (
+          <div style={{ marginTop: 14, padding: 16, background: T.bg, borderRadius: 10, border: `1px solid ${T.border}` }}>
+            <h4 style={{ fontFamily: "'Space Grotesk',sans-serif", fontSize: 14, fontWeight: 600, marginBottom: 12 }}>Create New Biobank</h4>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 10 }}>
+              <div><label style={lb}>Bank Name *</label><input value={newBank.name} onChange={e => setNewBank(prev => ({ ...prev, name: e.target.value }))} placeholder="NordicBio Repository" style={{ ...inp, width: "100%" }} /></div>
+              <div><label style={lb}>Location</label><input value={newBank.location} onChange={e => setNewBank(prev => ({ ...prev, location: e.target.value }))} placeholder="Stockholm, Sweden" style={{ ...inp, width: "100%" }} /></div>
+            </div>
+            <div style={{ marginBottom: 10 }}><label style={lb}>Bio / Description</label><input value={newBank.bio} onChange={e => setNewBank(prev => ({ ...prev, bio: e.target.value }))} placeholder="Brief description of the biobank" style={{ ...inp, width: "100%" }} /></div>
+            <div style={{ marginBottom: 12 }}><label style={lb}>Specialties (comma separated)</label><input value={newBank.specialties} onChange={e => setNewBank(prev => ({ ...prev, specialties: e.target.value }))} placeholder="Oncology, Neurology, Rare Disease" style={{ ...inp, width: "100%" }} /></div>
+            <button onClick={createNewBank} disabled={creatingBank} style={{ ...btnP, padding: "10px 20px", fontSize: 13, opacity: creatingBank ? 0.6 : 1 }}>{creatingBank ? "Creating..." : "Create Biobank"}</button>
+          </div>
+        )}
       </div>
 
       {result && <div style={{ padding: "10px 14px", borderRadius: 8, background: result.ok ? T.accentDim : "rgba(239,68,68,0.1)", color: result.ok ? T.accent : T.danger, fontSize: 13, marginBottom: 14 }}>{result.msg}</div>}
