@@ -50,7 +50,16 @@ const db = {
     if (!biobankId) return [];
     const { data, error } = await supabase.from('requests').select('*, samples(disease, subtype)').eq('biobank_id', biobankId).order('created_at', { ascending: false });
     if (error) { console.error("LOAD BB REQUESTS:", error); return []; }
-    return data || [];
+    // Load researcher names for each request
+    const withNames = await Promise.all((data || []).map(async (r) => {
+      if (r.researcher_id) {
+        const p = await db.getProfile(r.researcher_id);
+        r._name = p?.name || p?.email || "Researcher";
+        r._institution = p?.institution || "";
+      }
+      return r;
+    }));
+    return withNames;
   },
   async updateRequestStatus(id, status) {
     const { error } = await supabase.from('requests').update({ status }).eq('id', id);
@@ -550,6 +559,7 @@ function ResearcherView({ onNav, user, logout, samples, messages, setMessages, t
         <>
           <button onClick={() => setShowTracker(true)} style={btnG}>{I.list}</button>
           <button onClick={() => setShowFavorites(true)} style={{ ...btnG, position: "relative" }}>{I.heart(favorites.length > 0)}{favorites.length > 0 && <span style={{ position: "absolute", top: -4, right: -4, width: 16, height: 16, borderRadius: "50%", background: T.danger, color: "#fff", fontSize: 10, display: "flex", alignItems: "center", justifyContent: "center", fontWeight: 700 }}>{favorites.length}</span>}</button>
+          <button onClick={() => setShowMessages(true)} style={{ ...btnG, position: "relative" }}>{I.msg}<span style={{ position: "absolute", top: -1, right: 0, width: 7, height: 7, borderRadius: "50%", background: T.accent }} /></button>
           <button onClick={() => setShowRequest(true)} style={{ ...btnG, position: "relative" }}>{I.cart}{cart.length > 0 && <span style={{ position: "absolute", top: -4, right: -4, width: 18, height: 18, borderRadius: "50%", background: T.accent, color: T.bg, fontSize: 11, display: "flex", alignItems: "center", justifyContent: "center", fontWeight: 700 }}>{cart.length}</span>}</button>
           <button onClick={() => onNav("biobank")} style={btnG}>Dashboard</button>
         </>
@@ -742,6 +752,8 @@ function ResearcherView({ onNav, user, logout, samples, messages, setMessages, t
           })}
         </Modal>
       )}
+
+      {showMessages && <Modal onClose={() => setShowMessages(false)}><RealMsgPanel threads={realThreads} role="researcher" userName={user?.name || "Researcher"} userId={user?.id} /></Modal>}
     </div>
   );
 }
@@ -797,7 +809,7 @@ function BiobankDash({ onNav, user, logout, samples, setSamples, requests, setRe
     db.loadBiobankRequests(myBB.id).then(data => {
       if (data) {
         const mapped = data.map(r => ({
-          id: r.id, researcher: "Researcher", institution: "",
+          id: r.id, researcher: r._name || "Researcher", institution: r._institution || "",
           sampleId: r.sample_id, quantity: r.quantity, status: r.status, date: r.created_at?.slice(0, 10),
           message: r.message, _sample: r.samples,
         }));
@@ -847,7 +859,6 @@ function BiobankDash({ onNav, user, logout, samples, setSamples, requests, setRe
     { id: "requests", l: "Requests", icon: I.inbox, badge: allRequests.filter(r => r.status === "pending").length },
     { id: "shipping", l: "Shipping", icon: I.cart },
     { id: "payments", l: "Leads", icon: I.chart },
-    { id: "messages", l: "Messages", icon: I.msg, badge: realThreads.length },
   ];
 
   return (
@@ -871,7 +882,6 @@ function BiobankDash({ onNav, user, logout, samples, setSamples, requests, setRe
           {tab === "requests" && <RequestsTab requests={allRequests} onUpdate={updateReq} />}
           {tab === "shipping" && <ShippingTab requests={allRequests} onUpdate={updateReq} />}
           {tab === "payments" && <PaymentsTab requests={allRequests} bb={myBB} />}
-          {tab === "messages" && <RealMsgPanel threads={realThreads} role="biobank" userName={myBB.name} userId={user?.id} />}
         </main>
       </div>
     </div>
@@ -1094,18 +1104,20 @@ function RequestsTab({ requests, onUpdate }) {
 // ── Profile Page ───────────────────────────────────────────
 function ProfilePage({ onNav, user, logout }) {
   const [editing, setEditing] = useState(false);
-  const [form, setForm] = useState({ name: user?.name || "", email: user?.email || "", institution: user?.institution || "", location: user?.location || "", bio: user?.bio || "Biomedical researcher focused on translational oncology and precision medicine.", biobankName: "" });
+  const [form, setForm] = useState({ name: user?.name || "", email: user?.email || "", institution: user?.institution || "", location: user?.location || "", bio: user?.bio || "", biobankName: "" });
+  const [bbLoaded, setBbLoaded] = useState(false);
   const set = (k, v) => setForm(prev => ({ ...prev, [k]: v }));
   const isR = user?.role === "researcher";
 
-  // Load biobank name for biobank users
+  // Load biobank name ONCE for biobank users
   useEffect(() => {
-    if (!isR && user?.id) {
+    if (!isR && user?.id && !bbLoaded) {
       db.getMyBiobank(user.id).then(bb => {
-        if (bb) set("biobankName", bb.name);
-      }).catch(() => {});
+        if (bb) setForm(prev => ({ ...prev, biobankName: bb.name || "" }));
+        setBbLoaded(true);
+      }).catch(() => setBbLoaded(true));
     }
-  }, [user?.id]);
+  }, [user?.id, isR, bbLoaded]);
 
   const saveProfile = () => {
     db.updateProfile(user?.id, { name: form.name, email: form.email, institution: form.institution, location: form.location, bio: form.bio }).catch(e => console.error('SAVE ERROR:', e));
@@ -1353,57 +1365,88 @@ function ShippingTab({ requests, onUpdate }) {
 
 // ── Payments / Leads Tab ──────────────────────────
 function PaymentsTab({ requests, bb }) {
-  const approved = requests.filter(r => r.status !== "pending" && r.status !== "rejected");
+  const [unlockedLeads, setUnlockedLeads] = useState([]);
+  const LEAD_PRICE = 50;
   const totalLeads = requests.length;
-  const convertedLeads = approved.length;
-  const conversionRate = totalLeads > 0 ? Math.round((convertedLeads / totalLeads) * 100) : 0;
+  const paidLeads = unlockedLeads.length;
+  const pendingLeads = totalLeads - paidLeads;
+
+  const unlockLead = (leadId) => {
+    if (window.confirm(`Unlock this lead for $${LEAD_PRICE}?\n\nIn production, this opens Stripe Checkout.`)) {
+      setUnlockedLeads(prev => [...prev, leadId]);
+    }
+  };
+
+  const blur = { filter: "blur(5px)", userSelect: "none", pointerEvents: "none" };
 
   return (
     <div>
-      <h2 style={{ fontFamily: "'Space Grotesk',sans-serif", fontSize: 18, fontWeight: 600, marginBottom: 6 }}>Leads & Revenue</h2>
-      <p style={{ color: T.textMuted, fontSize: 13, marginBottom: 20 }}>Track researcher inquiries and conversion metrics.</p>
+      <h2 style={{ fontFamily: "'Space Grotesk',sans-serif", fontSize: 18, fontWeight: 600, marginBottom: 6 }}>Leads & Payments</h2>
+      <p style={{ color: T.textMuted, fontSize: 13, marginBottom: 20 }}>Pay to unlock researcher details for qualified leads.</p>
 
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))", gap: 10, marginBottom: 24 }}>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(140px, 1fr))", gap: 10, marginBottom: 24 }}>
         {[
           { l: "Total Leads", v: totalLeads, c: T.info },
-          { l: "Converted", v: convertedLeads, c: T.accent },
-          { l: "Conversion Rate", v: conversionRate + "%", c: T.warning },
-          { l: "Pending Review", v: requests.filter(r => r.status === "pending").length, c: "#8b5cf6" },
+          { l: "Unlocked", v: paidLeads, c: T.accent },
+          { l: "Locked", v: pendingLeads, c: T.warning },
+          { l: "Spent", v: `$${paidLeads * LEAD_PRICE}`, c: "#8b5cf6" },
         ].map((s, i) => (
-          <div key={i} style={{ ...crd, padding: 18, textAlign: "center", animation: `slideUp 0.3s ease ${i * 0.08}s both` }}>
-            <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontSize: 26, fontWeight: 700, color: s.c }}>{s.v}</div>
+          <div key={i} style={{ ...crd, padding: 16, textAlign: "center", animation: `slideUp 0.3s ease ${i * 0.08}s both` }}>
+            <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontSize: 24, fontWeight: 700, color: s.c }}>{s.v}</div>
             <div style={{ fontSize: 11, color: T.textMuted, marginTop: 4 }}>{s.l}</div>
           </div>
         ))}
       </div>
 
-      <div style={{ ...crd, padding: 20, marginBottom: 16 }}>
-        <h3 style={{ fontFamily: "'Space Grotesk',sans-serif", fontSize: 15, fontWeight: 600, marginBottom: 14 }}>Lead History</h3>
-        {requests.length === 0 ? <p style={{ color: T.textMuted }}>No leads yet.</p> : (
-          <div style={{ borderRadius: 10, border: `1px solid ${T.border}`, overflow: "hidden" }}>
-            <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
-              <thead><tr style={{ background: T.surfaceLight }}>
-                {["Date", "Researcher", "Sample", "Qty", "Status"].map(h => <th key={h} style={{ padding: "10px 12px", textAlign: "left", fontWeight: 500, color: T.textMuted, fontSize: 10, textTransform: "uppercase", letterSpacing: 1 }}>{h}</th>)}
-              </tr></thead>
-              <tbody>
-                {requests.map(r => (
-                  <tr key={r.id} style={{ borderTop: `1px solid ${T.border}` }}>
-                    <td style={cl}>{r.date}</td>
-                    <td style={cl}>{r.researcher || "Researcher"}</td>
-                    <td style={cl}>{r._sample?.disease || "Sample"}</td>
-                    <td style={cl}>{r.quantity}</td>
-                    <td style={cl}><span style={{ color: statusColors[r.status] || T.textMuted, fontWeight: 500, textTransform: "capitalize" }}>{r.status}</span></td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
-      </div>
+      {requests.length === 0 ? <p style={{ color: T.textMuted, textAlign: "center", padding: 30 }}>No leads yet.</p> : (
+        <div style={{ display: "grid", gap: 10, marginBottom: 20 }}>
+          {requests.map((r, i) => {
+            const open = unlockedLeads.includes(r.id);
+            return (
+              <div key={r.id} style={{ ...crd, padding: 16, animation: `slideUp 0.3s ease ${i * 0.05}s both`, borderColor: open ? T.accent : T.border }}>
+                <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 10 }}>
+                  <div>
+                    <div style={{ fontSize: 12, color: T.accent }}>{r._sample?.disease || "Sample"} — {r._sample?.subtype || ""} · Qty: {r.quantity}</div>
+                    <div style={{ fontSize: 11, color: T.textMuted }}>{r.date}</div>
+                  </div>
+                  <span style={{ ...tg, background: open ? T.accentDim : "rgba(245,158,11,0.15)", color: open ? T.accent : T.warning }}>{open ? "Unlocked" : "Locked"}</span>
+                </div>
+                <div style={{ padding: 14, background: T.bg, borderRadius: 10, border: `1px solid ${T.border}`, position: "relative", minHeight: 70 }}>
+                  {open ? (
+                    <div>
+                      <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 3 }}>{r.researcher || "Researcher"}</div>
+                      <div style={{ fontSize: 12, color: T.textMuted, marginBottom: 6 }}>{r.institution || ""}</div>
+                      <div style={{ fontSize: 13, lineHeight: 1.6 }}>{r.message}</div>
+                    </div>
+                  ) : (
+                    <div>
+                      <div style={blur}><div style={{ fontSize: 14, fontWeight: 600 }}>{r.researcher || "Dr. Researcher"}</div><div style={{ fontSize: 12, color: T.textMuted }}>{r.institution || "Research University"}</div><div style={{ fontSize: 13, marginTop: 6 }}>{r.message || "Request message details here..."}</div></div>
+                      <div style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", borderRadius: 10 }}>
+                        <button onClick={() => unlockLead(r.id)} style={{ ...btnP, padding: "10px 24px", fontSize: 13, boxShadow: `0 4px 20px ${T.accentGlow}` }}>Unlock for ${LEAD_PRICE}</button>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
 
       <div style={{ ...crd, padding: 20 }}>
-        <h3 style={{ fontFamily: "'Space Grotesk',sans-serif", fontSize: 15, fontWeight: 600, marginBottom: 10 }}>Pricing</h3>
-        <p style={{ color: T.textMuted, fontSize: 13, lineHeight: 1.7 }}>BioVault charges a lead fee for each qualified researcher inquiry. Current rate: <span style={{ color: T.accent, fontWeight: 600 }}>$50 per qualified lead</span>. Leads are only counted when a researcher submits a formal request for your samples.</p>
+        <h3 style={{ fontFamily: "'Space Grotesk',sans-serif", fontSize: 15, fontWeight: 600, marginBottom: 12 }}>How It Works</h3>
+        <div style={{ display: "grid", gap: 10, color: T.textMuted, fontSize: 13, lineHeight: 1.7 }}>
+          {[
+            "Researchers request your samples through the marketplace.",
+            "Each request appears as a locked lead — you can see the sample but not who requested it.",
+            `Pay $${LEAD_PRICE} per lead to unlock the researcher's name, institution, and message. Then approve from the Requests tab.`,
+          ].map((t, i) => (
+            <div key={i} style={{ display: "flex", gap: 12 }}>
+              <span style={{ width: 26, height: 26, borderRadius: "50%", background: T.accentDim, color: T.accent, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 12, fontWeight: 700, flexShrink: 0 }}>{i + 1}</span>
+              <span>{t}</span>
+            </div>
+          ))}
+        </div>
       </div>
     </div>
   );
